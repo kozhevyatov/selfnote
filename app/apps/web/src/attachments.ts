@@ -63,8 +63,13 @@ export async function flushImages(workspace: Workspace) {
   if (busy || !navigator.onLine) return;
   busy = true;
   try {
+    const docs: Y.Doc[] = [];
     for (const entry of workspace.notes.values()) {
       await entry.ready;
+      docs.push(entry.doc);
+    }
+    docs.push(...workspace.secure.docs());
+    for (const doc of docs) {
       const images: Y.XmlElement[] = [];
       function walk(node: Y.XmlFragment | Y.XmlElement) {
         for (const child of node.toArray())
@@ -77,7 +82,7 @@ export async function flushImages(workspace: Workspace) {
             walk(child);
           }
       }
-      walk(entry.doc.getXmlFragment('content'));
+      walk(doc.getXmlFragment('content'));
       for (const image of images) {
         const src = image.getAttribute('src')!;
         const record = await get(`${workspace.userId}:${src}`);

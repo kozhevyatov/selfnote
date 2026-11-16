@@ -1,4 +1,11 @@
 import * as Y from 'yjs';
+import { localDate } from './dates.js';
+import { checkTaskAttributes } from './repeat.js';
+export * from './dates.js';
+export * from './repeat.js';
+export * from './render.js';
+export * from './search.js';
+export * from './secure.js';
 export interface Notebook {
   id: string;
   name: string;
@@ -16,9 +23,13 @@ export interface Note {
   sectionId: string | null;
   tags: string[];
   pinned: boolean;
+  /** Избранное — отдельный раздел в навигации. */
+  favorite?: boolean;
   updatedAt: string;
   deletedAt: string | null;
   encrypted: boolean;
+  /** Заголовок заметки под паролем тоже зашифрован; в списке — «Заметка под паролем». */
+  hideTitle?: boolean;
   color: string | null;
   /** Откуда импортирована (например, nsx:1026_…) — защита от повторного импорта. */
   source?: string;
@@ -30,6 +41,8 @@ export interface Task {
   due: string | null;
   doneAt: string | null;
   position: number;
+  /** Правило повтора (подмножество RRULE), см. repeat.ts. */
+  repeat?: string | null;
 }
 export function extractDocument(doc: Y.Doc): { plainText: string; tasks: Task[] } {
   const tasks: Task[] = [];
@@ -63,6 +76,7 @@ export function extractDocument(doc: Y.Doc): { plainText: string; tasks: Task[] 
             due: typeof attrs.due === 'string' && attrs.due ? attrs.due : null,
             doneAt: typeof attrs.doneAt === 'string' && attrs.doneAt ? attrs.doneAt : null,
             position: tasks.length,
+            repeat: typeof attrs.repeat === 'string' && attrs.repeat ? attrs.repeat : null,
           });
       }
       walk(child);
@@ -78,11 +92,10 @@ export function setTaskChecked(doc: Y.Doc, id: string, checked: boolean): boolea
     for (const child of node.toArray())
       if (child instanceof Y.XmlElement) {
         if (child.nodeName === 'taskItem' && child.getAttribute('id') === id) {
-          child.setAttribute('checked', checked as unknown as string);
-          child.setAttribute(
-            'doneAt',
-            (checked ? new Date().toISOString() : null) as unknown as string,
-          );
+          const attrs = child.getAttributes() as Record<string, unknown>;
+          const patch = checkTaskAttributes(attrs, checked, localDate());
+          for (const [key, value] of Object.entries(patch))
+            child.setAttribute(key, value as unknown as string);
           found = true;
         }
         walk(child);
@@ -90,12 +103,6 @@ export function setTaskChecked(doc: Y.Doc, id: string, checked: boolean): boolea
   }
   doc.transact(() => walk(doc.getXmlFragment('content')));
   return found;
-}
-export function localDate(date = new Date()): string {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-}
-export function dueDay(due: string): string {
-  return due.length === 10 ? due : localDate(new Date(due));
 }
 /** Заметки из документа пространства, лежащие в корзине (поддерживает старый и новый формат). */
 export function deletedNoteIds(space: Y.Doc): Set<string> {

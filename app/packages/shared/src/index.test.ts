@@ -35,6 +35,7 @@ describe('Документ заметки', () => {
           due: '2026-11-15',
           doneAt: null,
           position: 0,
+          repeat: null,
         },
       ],
     });

@@ -1,4 +1,4 @@
-import { yDocToProsemirrorJSON } from '@tiptap/y-tiptap';
+import { yDocToProsemirrorJSON, ySyncPluginKey } from '@tiptap/y-tiptap';
 import * as Y from 'yjs';
 import { uuid } from './ids';
 import { useEffect, useState, useRef } from 'react';
@@ -32,8 +32,21 @@ import {
   Undo2,
   Redo2,
   CalendarDays,
+  Repeat,
+  Lock,
 } from 'lucide-react';
-import { dueDay, localDate } from '@selfnote/shared';
+import {
+  checkTaskAttributes,
+  dueDay,
+  firstDue,
+  formatRepeat,
+  localDate,
+  parseRepeat,
+  repeatLabel,
+  WEEK_DAY_SHORT,
+  WrongPasswordError,
+} from '@selfnote/shared';
+import { secureTitle } from './secure';
 import { storeImage, imageUrl, flushImages } from './attachments';
 import { Workspace, useUI } from './store';
 export function dueLabel(due: string) {
@@ -45,12 +58,125 @@ export function dueLabel(due: string) {
   });
   return day === today ? 'Сегодня' : day < today ? `Просрочено · ${label}` : label;
 }
-export function Due({ due }: { due: string }) {
+export function Due({ due, repeat }: { due: string; repeat?: string | null }) {
+  const label = repeatLabel(repeat);
   return (
     <span
       className={`due ${dueDay(due) < localDate() ? 'overdue' : dueDay(due) === localDate() ? 'today' : ''}`}
+      title={label || undefined}
     >
+      {label && <Repeat size={12} aria-label={label} />}
       {dueLabel(due)}
+    </span>
+  );
+}
+const REPEAT_OPTIONS = [
+  { label: 'Не повторять', rule: '' },
+  { label: 'Каждый день', rule: 'FREQ=DAILY' },
+  { label: 'По будням', rule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR' },
+  { label: 'Каждую неделю', rule: 'weekly' },
+  { label: 'Каждый месяц', rule: 'FREQ=MONTHLY' },
+];
+/** Выбор повтора задачи: готовые варианты и дни недели. */
+function RepeatPicker({
+  due,
+  repeat,
+  onChange,
+  disabled,
+}: {
+  due: string | null;
+  repeat: string | null;
+  onChange: (attrs: { repeat: string | null; due?: string | null }) => void;
+  disabled: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const wrap = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: PointerEvent) => {
+      if (!wrap.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const key = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false);
+    document.addEventListener('pointerdown', close);
+    document.addEventListener('keydown', key);
+    return () => {
+      document.removeEventListener('pointerdown', close);
+      document.removeEventListener('keydown', key);
+    };
+  }, [open]);
+  const current = parseRepeat(repeat);
+  const today = localDate();
+  const set = (rule: string) => {
+    if (!rule) return onChange({ repeat: null });
+    if (rule === 'weekly') {
+      const day = (new Date(`${due ? dueDay(due) : today}T12:00:00`).getDay() + 6) % 7;
+      rule = formatRepeat({ freq: 'WEEKLY', days: [day] });
+    }
+    // повтор без срока: срок — ближайший подходящий день
+    onChange({ repeat: rule, ...(due ? {} : { due: firstDue(rule, today) }) });
+  };
+  const toggleDay = (day: number) => {
+    const days = new Set(current?.freq === 'WEEKLY' ? current.days : []);
+    if (days.has(day)) days.delete(day);
+    else days.add(day);
+    if (!days.size) return onChange({ repeat: null });
+    const rule = formatRepeat({ freq: 'WEEKLY', days: [...days] });
+    onChange({ repeat: rule, ...(due ? {} : { due: firstDue(rule, today) }) });
+  };
+  return (
+    <span className="task-repeat" ref={wrap} contentEditable={false}>
+      <button
+        type="button"
+        className={`icon-button ${current ? 'active' : ''}`}
+        disabled={disabled}
+        title={repeatLabel(repeat) || 'Повтор'}
+        aria-label={repeatLabel(repeat) ? `Повтор: ${repeatLabel(repeat)}` : 'Настроить повтор'}
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+      >
+        <Repeat size={15} />
+      </button>
+      {open && (
+        <span className="popover repeat-popover" role="dialog" aria-label="Повтор задачи">
+          {REPEAT_OPTIONS.map((option) => {
+            const selected =
+              option.rule === 'weekly'
+                ? current?.freq === 'WEEKLY' && repeat !== REPEAT_OPTIONS[2].rule
+                : option.rule
+                  ? repeat === option.rule
+                  : !current;
+            return (
+              <button
+                key={option.label}
+                type="button"
+                className={selected ? 'selected' : ''}
+                aria-pressed={selected}
+                onClick={() => {
+                  set(option.rule);
+                  if (option.rule !== 'weekly') setOpen(false);
+                }}
+              >
+                {option.label}
+              </button>
+            );
+          })}
+          {current?.freq === 'WEEKLY' && (
+            <span className="week-days" role="group" aria-label="Дни недели">
+              {WEEK_DAY_SHORT.map((label, day) => (
+                <button
+                  key={label}
+                  type="button"
+                  aria-pressed={current.days.includes(day)}
+                  className={current.days.includes(day) ? 'selected' : ''}
+                  onClick={() => toggleDay(day)}
+                >
+                  {label}
+                </button>
+              ))}
+            </span>
+          )}
+        </span>
+      )}
     </span>
   );
 }
@@ -83,16 +209,23 @@ function TaskView({ node, updateAttributes, editor }: NodeViewProps) {
           checked={Boolean(node.attrs.checked)}
           aria-label={`Выполнить: ${node.textContent || 'задача'}`}
           onChange={(e) =>
-            updateAttributes({
-              checked: e.target.checked,
-              doneAt: e.target.checked ? new Date().toISOString() : null,
-            })
+            updateAttributes(checkTaskAttributes(node.attrs, e.target.checked, localDate()))
           }
         />
       </label>
       <NodeViewContent className="task-content" />
+      <RepeatPicker
+        due={node.attrs.due}
+        repeat={node.attrs.repeat}
+        disabled={!editor.isEditable}
+        onChange={(attrs) => updateAttributes(attrs)}
+      />
       <label className="task-date" contentEditable={false} title="Срок задачи">
-        {node.attrs.due ? <Due due={node.attrs.due} /> : <CalendarDays size={16} />}
+        {node.attrs.due ? (
+          <Due due={node.attrs.due} repeat={node.attrs.repeat} />
+        ) : (
+          <CalendarDays size={16} />
+        )}
         <input
           disabled={!editor.isEditable}
           aria-label="Срок задачи"
@@ -116,12 +249,14 @@ const Tasks = TaskItem.extend({
       id: { default: null, keepOnSplit: false },
       due: { default: null, keepOnSplit: false },
       doneAt: { default: null, keepOnSplit: false },
+      repeat: { default: null, keepOnSplit: false },
     };
   },
   addNodeView() {
     return ReactNodeViewRenderer(TaskView);
   },
 });
+const NORMALIZE = 'selfnote-normalize';
 const TaskIds = Extension.create({
   name: 'taskIds',
   addProseMirrorPlugins() {
@@ -139,7 +274,8 @@ const TaskIds = Extension.create({
               ids.add(fresh);
             } else ids.add(id);
           });
-          return tr.docChanged ? tr : null;
+          // Служебная правка (выдача id задачам) — не правка пользователя.
+          return tr.docChanged ? tr.setMeta(NORMALIZE, true).setMeta('addToHistory', false) : null;
         },
       }),
     ];
@@ -193,6 +329,18 @@ const LocalImage = Image.extend<{
   },
 });
 export function NoteEditor({ workspace, id }: { workspace: Workspace; id: string }) {
+  const meta = workspace.metadata.get(id);
+  if (meta?.encrypted) {
+    const doc = workspace.secure.doc(id);
+    return doc ? (
+      <EditorBody key={doc.guid} workspace={workspace} id={id} doc={doc} />
+    ) : (
+      <UnlockNote workspace={workspace} id={id} />
+    );
+  }
+  return <PlainEditor workspace={workspace} id={id} />;
+}
+function PlainEditor({ workspace, id }: { workspace: Workspace; id: string }) {
   const entry = workspace.note(id);
   const [ready, setReady] = useState(false);
   useEffect(() => {
@@ -204,12 +352,60 @@ export function NoteEditor({ workspace, id }: { workspace: Workspace; id: string
     };
   }, [entry, workspace, id]);
   return ready ? (
-    <EditorBody workspace={workspace} id={id} />
+    <EditorBody workspace={workspace} id={id} doc={entry.doc} />
   ) : (
     <div className="empty">Открываем заметку…</div>
   );
 }
-function EditorBody({ workspace, id }: { workspace: Workspace; id: string }) {
+/** Экран заметки под паролем: пароль спрашивается при открытии. */
+function UnlockNote({ workspace, id }: { workspace: Workspace; id: string }) {
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  return (
+    <form
+      className="unlock"
+      onSubmit={async (e) => {
+        e.preventDefault();
+        setBusy(true);
+        setError('');
+        try {
+          await workspace.secure.unlock(id, password);
+        } catch (err) {
+          setError(err instanceof WrongPasswordError ? 'Неверный пароль' : (err as Error).message);
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      <span className="welcome-icon">
+        <Lock size={26} />
+      </span>
+      <h2>Заметка под паролем</h2>
+      <p className="muted">Содержимое зашифровано на этом устройстве. Введите пароль заметки.</p>
+      <label>
+        Пароль
+        <input
+          type="password"
+          autoFocus
+          autoComplete="current-password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          required
+        />
+      </label>
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+      <button className="primary" disabled={busy || !password}>
+        {busy ? 'Проверяем…' : 'Открыть'}
+      </button>
+    </form>
+  );
+}
+function EditorBody({ workspace, id, doc }: { workspace: Workspace; id: string; doc: Y.Doc }) {
   const imageInput = useRef<HTMLInputElement>(null);
   const [link, setLink] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
@@ -221,7 +417,7 @@ function EditorBody({ workspace, id }: { workspace: Workspace; id: string }) {
         heading: { levels: [2, 3] },
         link: { openOnClick: false },
       }),
-      Collaboration.configure({ document: workspace.note(id).doc, field: 'content' }),
+      Collaboration.configure({ document: doc, field: 'content' }),
       Spoiler,
       TaskList,
       Tasks,
@@ -264,7 +460,10 @@ function EditorBody({ workspace, id }: { workspace: Workspace; id: string }) {
         return false;
       },
     },
-    onUpdate: () => {
+    onUpdate: ({ transaction }) => {
+      // Открытие заметки и правки с других устройств приходят транзакцией y-sync —
+      // это не изменение, дату правки не трогаем (иначе заметка всплывает наверх списка).
+      if (transaction.getMeta(ySyncPluginKey) || transaction.getMeta(NORMALIZE)) return;
       queueMicrotask(() => workspace.update(id, {}));
     },
     onSelectionUpdate: () => setTick((t) => t + 1),
@@ -282,6 +481,7 @@ function EditorBody({ workspace, id }: { workspace: Workspace; id: string }) {
     }
   }
   if (!editor) return null;
+  const hiddenTitle = Boolean(workspace.metadata.get(id)?.hideTitle);
   const button = (label: string, Icon: typeof Bold, action: () => void, active?: boolean) => (
     <button
       key={label}
@@ -382,8 +582,14 @@ function EditorBody({ workspace, id }: { workspace: Workspace; id: string }) {
           className="note-title"
           aria-label="Название заметки"
           placeholder="Без названия"
-          value={workspace.metadata.get(id)?.title || ''}
-          onChange={(e) => workspace.update(id, { title: e.target.value })}
+          value={hiddenTitle ? secureTitle(doc) : workspace.metadata.get(id)?.title || ''}
+          onChange={(e) => {
+            if (hiddenTitle) {
+              // заголовок шифруется вместе с содержимым
+              doc.getMap('secure').set('title', e.target.value);
+              workspace.update(id, {});
+            } else workspace.update(id, { title: e.target.value });
+          }}
         />
         <EditorContent editor={editor} />
         <p className="editor-hint">Напишите что-нибудь или начните список с «[ ]»</p>

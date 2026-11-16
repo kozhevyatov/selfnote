@@ -11,6 +11,8 @@ import {
 } from '@selfnote/shared';
 import { api, refresh, token } from './api';
 import { uuid } from './ids';
+import { SecureNotes, secureTitle } from './secure';
+import type { Theme } from './theme';
 export const useUI = create<{
   selected: string | null;
   filter: string;
@@ -53,7 +55,11 @@ export class Workspace {
   private revision = 0;
   private timer: ReturnType<typeof setInterval>;
   private stopped = false;
+  /** Документы, к которым сервер не пустил (удалены, под паролем и т. п.). */
+  private failed = new Set<string>();
+  readonly secure: SecureNotes;
   constructor(readonly userId: string) {
+    this.secure = new SecureNotes(this);
     this.socket = new HocuspocusProviderWebsocket({
       url: `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/collab`,
     });
@@ -66,10 +72,12 @@ export class Workspace {
     this.space.ready.then(() => {
       this.cleanTrash();
       this.loadNotes();
+      void this.secure.sync();
     });
     this.timer = setInterval(() => {
       this.cleanTrash();
       void this.saveVersions();
+      void this.secure.sync();
     }, 300000);
     window.addEventListener('online', this.reconnect);
     window.addEventListener('pagehide', this.onHide);
@@ -83,6 +91,7 @@ export class Workspace {
         if (this.stopped) return;
         void this.socket.connect();
         void this.flushVersions();
+        void this.secure.sync();
       })
       .catch(() => this.emit());
   };
@@ -99,12 +108,19 @@ export class Workspace {
       },
       onStatus: () => this.emit(),
       onSynced: () => {
-        if (name.startsWith('space:')) this.cleanTrash();
+        this.failed.delete(name);
+        if (name.startsWith('space:')) {
+          this.cleanTrash();
+          void this.secure.sync();
+        }
         this.emit();
         void this.flushVersions();
       },
       onUnsyncedChanges: () => this.emit(),
-      onAuthenticationFailed: () => this.emit(),
+      onAuthenticationFailed: () => {
+        this.failed.add(name);
+        this.emit();
+      },
     });
     provider.attach();
     doc.on('update', () => this.emit());
@@ -147,17 +163,63 @@ export class Workspace {
     });
   }
   private loadNotes() {
-    for (const [id, entry] of this.notes)
+    for (const id of [...this.notes.keys()])
       if (!this.noteMap.has(id)) {
-        entry.provider.destroy();
-        void entry.local.clearData();
-        entry.doc.destroy();
-        this.notes.delete(id);
-        this.extracted.delete(id);
-        localStorage.removeItem(`version:${this.userId}:${id}`);
+        this.dropPlain(id);
         if (useUI.getState().selected === id) useUI.getState().select(null);
-      }
-    for (const id of this.noteMap.keys()) this.note(id);
+      } else if (this.metadata.get(id)?.encrypted) this.dropPlain(id);
+    for (const [id, note] of this.metadata) {
+      if (!note.encrypted) this.note(id);
+    }
+    const secureIds = new Set(
+      [...this.metadata.values()].filter((n) => n.encrypted).map((n) => n.id),
+    );
+    if ([...secureIds].join() === [...this.secureIds].join()) return;
+    for (const id of this.secureIds) if (!secureIds.has(id)) this.secure.lock(id);
+    this.secureIds = secureIds;
+    void this.secure.prune(secureIds).catch(() => undefined);
+  }
+  private secureIds = new Set<string>();
+  /** Убрать открытую копию заметки с устройства (удалена или закрыта паролем). */
+  dropPlain(id: string) {
+    const entry = this.notes.get(id);
+    if (!entry) return;
+    entry.provider.destroy();
+    void entry.local.clearData();
+    entry.doc.destroy();
+    this.notes.delete(id);
+    this.extracted.delete(id);
+    this.failed.delete(`note:${id}`);
+    localStorage.removeItem(`version:${this.userId}:${id}`);
+  }
+  /** Дождаться, пока заметка получит всё с сервера и отправит свои правки. */
+  async whenSynced(id: string, timeout = 15000) {
+    const entry = this.note(id);
+    await entry.ready;
+    const deadline = Date.now() + timeout;
+    while (!entry.provider.isSynced || entry.provider.hasUnsyncedChanges) {
+      if (Date.now() > deadline) throw new Error('Дождитесь синхронизации заметки с сервером');
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  }
+  /** Документ заметки: обычный или расшифрованный (null — заметка под паролем закрыта). */
+  noteDoc(id: string): Y.Doc | null {
+    if (this.metadata.get(id)?.encrypted) return this.secure.doc(id) ?? null;
+    return this.note(id).doc;
+  }
+  forgetExtracted(id: string) {
+    this.extracted.delete(id);
+  }
+  /** Название для списка: у заметки со скрытым заголовком — из зашифрованного документа. */
+  title(note: Note) {
+    if (note.encrypted && note.hideTitle) {
+      const doc = this.secure.doc(note.id);
+      return doc ? secureTitle(doc) || 'Без названия' : 'Заметка под паролем';
+    }
+    return note.title || 'Без названия';
+  }
+  toast(message: string) {
+    useUI.getState().toast(message);
   }
   note(id: string) {
     let entry = this.notes.get(id);
@@ -176,12 +238,18 @@ export class Workspace {
   extract(id: string): Extracted {
     let value = this.extracted.get(id);
     if (!value) {
-      value = extractDocument(this.note(id).doc);
+      const doc = this.noteDoc(id);
+      if (!doc) return { plainText: '', tasks: [] };
+      value = extractDocument(doc);
       this.extracted.set(id, value);
     }
     return value;
   }
-  update(id: string, patch: Partial<Note>) {
+  /**
+   * Изменить свойства заметки. Дата правки обновляется только при изменении содержимого
+   * (пустой patch) или названия — перенос, закрепление, метки не поднимают заметку в списке.
+   */
+  update(id: string, patch: Partial<Note>, touch = !Object.keys(patch).length || 'title' in patch) {
     const current = this.noteMap.get(id);
     if (!current) return;
     this.space.doc.transact(() => {
@@ -197,8 +265,30 @@ export class Workspace {
         const old = fields.get(key);
         if (JSON.stringify(old) !== JSON.stringify(value)) fields.set(key, value ?? null);
       }
-      fields.set('updatedAt', new Date().toISOString());
+      if (touch) fields.set('updatedAt', new Date().toISOString());
     });
+  }
+  /** Метаданные новой заметки под паролем (содержимое уже лежит в SecureNotes). */
+  addEncryptedNote(
+    id: string,
+    meta: Pick<Note, 'title' | 'notebookId' | 'sectionId'> & { hideTitle: boolean },
+  ) {
+    const fields = new Y.Map<unknown>();
+    for (const [key, value] of Object.entries({
+      id,
+      title: meta.title,
+      notebookId: meta.notebookId,
+      sectionId: meta.sectionId,
+      tags: [],
+      pinned: false,
+      updatedAt: new Date().toISOString(),
+      deletedAt: null,
+      encrypted: true,
+      hideTitle: meta.hideTitle,
+      color: null,
+    } satisfies Note))
+      fields.set(key, value);
+    this.noteMap.set(id, fields);
   }
   /**
    * Создать заметку программно (импорт): не выбирает её в интерфейсе и не трогает фильтр.
@@ -272,23 +362,82 @@ export class Workspace {
     return id;
   }
   get status() {
-    const entries = [this.space, ...this.notes.values()];
     if (!navigator.onLine) return 'Офлайн · сохранено здесь';
-    if (this.socket.status !== 'connected' || entries.some((e) => !e.provider.isSynced))
-      return 'Подключение…';
-    if (entries.some((e) => e.provider.hasUnsyncedChanges)) return 'Синхронизация…';
+    if (this.socket.status !== 'connected') return 'Подключение…';
+    const entries = [this.space, ...this.notes.values()].filter(
+      (e) => !this.failed.has(e.provider.configuration.name),
+    );
+    if (
+      entries.some((e) => !e.provider.isSynced || e.provider.hasUnsyncedChanges) ||
+      this.secure.pending
+    )
+      return 'Синхронизация…';
+    if (this.failed.size) return 'Не всё синхронизировано';
     return 'Синхронизировано';
   }
   getTasks() {
+    const order = this.space.doc.getMap<number>('taskOrder');
     return [...this.metadata.values()]
       .filter((n) => !n.deletedAt)
       .flatMap((note) =>
         this.extract(note.id).tasks.map((task) => ({
           ...task,
           noteId: note.id,
-          noteTitle: note.title || 'Без названия',
+          noteTitle: this.title(note),
+          order: order.get(`${note.id}:${task.id}`),
         })),
       );
+  }
+  /** Ручной порядок задач во вкладке «Задачи» (группа «Без срока»). */
+  setTaskOrder(keys: string[]) {
+    const order = this.space.doc.getMap<number>('taskOrder');
+    this.space.doc.transact(() => keys.forEach((key, index) => order.set(key, index)));
+  }
+  /** Предпочтения, общие для всех устройств. */
+  get appearance(): { theme?: Theme; accent?: string } {
+    const prefs = this.space.doc.getMap<string>('prefs');
+    return { theme: prefs.get('theme') as Theme | undefined, accent: prefs.get('accent') };
+  }
+  setAppearance(theme: Theme, accent: string) {
+    const prefs = this.space.doc.getMap<string>('prefs');
+    this.space.doc.transact(() => {
+      prefs.set('theme', theme);
+      prefs.set('accent', accent);
+    });
+  }
+  /** Быстрая задача — в заметку «Входящие» (создаётся сама). */
+  async quickTask(text: string, due: string | null) {
+    const prefs = this.space.doc.getMap<string>('prefs');
+    let id = prefs.get('inbox');
+    const meta = id ? this.metadata.get(id) : undefined;
+    if (!id || !meta || meta.deletedAt || meta.encrypted) {
+      id = this.addNote({ title: 'Входящие' });
+      prefs.set('inbox', id);
+    }
+    const entry = this.note(id);
+    await entry.ready;
+    const content = entry.doc.getXmlFragment('content');
+    entry.doc.transact(() => {
+      let list = content
+        .toArray()
+        .find((n): n is Y.XmlElement => n instanceof Y.XmlElement && n.nodeName === 'taskList');
+      if (!list) {
+        list = new Y.XmlElement('taskList');
+        content.push([list]);
+      }
+      const item = new Y.XmlElement('taskItem');
+      item.setAttribute('id', uuid());
+      item.setAttribute('checked', false as unknown as string);
+      if (due) item.setAttribute('due', due);
+      const paragraph = new Y.XmlElement('paragraph');
+      const value = new Y.XmlText();
+      value.insert(0, text);
+      paragraph.insert(0, [value]);
+      item.insert(0, [paragraph]);
+      list.push([item]);
+    });
+    this.update(id, {});
+    return id;
   }
   subscribe = (callback: () => void) => {
     this.callbacks.add(callback);
@@ -302,7 +451,7 @@ export class Workspace {
     for (const callback of this.callbacks) callback();
   };
   markVersion(id: string) {
-    if (!this.metadata.has(id)) return;
+    if (!this.metadata.has(id) || this.metadata.get(id)?.encrypted) return;
     localStorage.setItem(`version:${this.userId}:${id}`, '1');
   }
   async saveVersion(id: string) {
@@ -348,6 +497,7 @@ export class Workspace {
   }
   destroy() {
     this.stopped = true;
+    this.secure.destroy();
     clearInterval(this.timer);
     window.removeEventListener('online', this.reconnect);
     window.removeEventListener('pagehide', this.onHide);

@@ -26,16 +26,26 @@ import {
   Check,
   Sun,
   NotebookPen,
+  Star,
+  Lock,
+  LockOpen,
+  Share2,
+  FolderInput,
 } from 'lucide-react';
 import MiniSearch from 'minisearch';
 import {
   localDate,
   dueDay,
   setTaskChecked,
+  snippet,
   type Note,
   type Notebook,
   type Section,
+  type SnippetPart,
 } from '@selfnote/shared';
+import { ACCENTS, applyAppearance, storedAppearance, type Theme } from './theme';
+import { PasswordDialog, type PasswordMode } from './NoteSecurity';
+import { ShareDialog } from './Share';
 import { api, refresh, setToken, type User } from './api';
 import { Auth } from './Auth';
 import { DataSettings } from './DataSettings';
@@ -43,6 +53,7 @@ import { Workspace, useUI } from './store';
 import { NoteEditor, Due } from './Editor';
 import { flushImages } from './attachments';
 const colors = ['#C2410C', '#3451D1', '#2B7A3D', '#7A3DB8'];
+const NOTE_TYPE = 'application/x-selfnote-note';
 interface Dialog {
   title: string;
   value: string;
@@ -189,11 +200,29 @@ function WorkspaceShell({
         setDialog(null);
         setSettings(false);
         setMore(false);
+        closeMenus();
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [workspace]);
+  // Выпадающие меню закрываются кликом мимо них и после выбора пункта.
+  useEffect(() => {
+    const outside = (e: PointerEvent) => {
+      const target = e.target as Element;
+      closeMenus(target.closest('details.row-menu'));
+      if (!target.closest('.menu-wrap')) setMore(false);
+    };
+    const picked = (e: MouseEvent) => {
+      if ((e.target as Element).closest('details.row-menu .popover button')) closeMenus();
+    };
+    document.addEventListener('pointerdown', outside);
+    document.addEventListener('click', picked);
+    return () => {
+      document.removeEventListener('pointerdown', outside);
+      document.removeEventListener('click', picked);
+    };
+  }, []);
   useEffect(() => {
     if (ui.message) {
       const timer = setTimeout(() => useUI.setState({ message: '' }), 5000);
@@ -204,7 +233,75 @@ function WorkspaceShell({
   const sections = [...workspace.sections.values()];
   const notes = [...workspace.metadata.values()];
   const [history, setHistory] = useState(false);
-  const [accent, setAccent] = useState(() => localStorage.getItem('accent') || '#3451D1');
+  const [appearance, setAppearanceState] = useState(storedAppearance);
+  const [password, setPassword] = useState<PasswordMode | null>(null);
+  const [sharing, setSharing] = useState(false);
+  const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const [remote, setRemote] = useState<{ id: string; parts: SnippetPart[] | null }[]>([]);
+  const [sharedIds, setSharedIds] = useState<Set<string>>(
+    () => new Set(JSON.parse(localStorage.getItem(`shared:${user.id}`) || '[]')),
+  );
+  function setAppearance(theme: Theme, accent: string) {
+    applyAppearance(theme, accent);
+    setAppearanceState({ theme, accent });
+    workspace.setAppearance(theme, accent);
+  }
+  // оформление, выбранное на другом устройстве, приходит через документ пространства
+  const synced = workspace.appearance;
+  useEffect(() => {
+    if (!synced.theme || !synced.accent) return;
+    const local = storedAppearance();
+    if (local.theme === synced.theme && local.accent === synced.accent) return;
+    applyAppearance(synced.theme, synced.accent);
+    setAppearanceState({ theme: synced.theme, accent: synced.accent });
+  }, [synced.theme, synced.accent]);
+  // серверный поиск дополняет локальный: находит заметки, ещё не загруженные на устройство
+  useEffect(() => {
+    const query = ui.query.trim();
+    if (!query || !navigator.onLine) {
+      setRemote([]);
+      return;
+    }
+    let active = true;
+    const timer = setTimeout(() => {
+      api<{ id: string; parts: SnippetPart[] | null }[]>(
+        `/api/search?q=${encodeURIComponent(query)}`,
+      )
+        .then((rows) => active && setRemote(rows))
+        .catch(() => active && setRemote([]));
+    }, 300);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [ui.query]);
+  const refreshShared = async () => {
+    try {
+      const rows = await api<{ note_id: string }[]>('/api/shares');
+      const ids = new Set(rows.map((r) => r.note_id));
+      setSharedIds(ids);
+      localStorage.setItem(`shared:${user.id}`, JSON.stringify([...ids]));
+    } catch {
+      /* офлайн — показываем последний известный список */
+    }
+  };
+  useEffect(() => {
+    if (ui.filter === 'shared') void refreshShared();
+  }, [ui.filter]);
+  useEffect(() => {
+    if (!menu) return;
+    const close = (e: PointerEvent) => {
+      if (!(e.target as Element).closest('.context-menu')) setMenu(null);
+    };
+    const key = (e: KeyboardEvent) => e.key === 'Escape' && setMenu(null);
+    document.addEventListener('pointerdown', close);
+    document.addEventListener('keydown', key);
+    return () => {
+      document.removeEventListener('pointerdown', close);
+      document.removeEventListener('keydown', key);
+    };
+  }, [menu]);
   const selected = ui.selected ? workspace.metadata.get(ui.selected) : undefined;
   const tasks = workspace.getTasks();
   const todayTasks = tasks.filter((t) => !t.checked && t.due && dueDay(t.due) <= localDate());
@@ -219,20 +316,30 @@ function WorkspaceShell({
     search.addAll(
       [...workspace.metadata.values()].map((n) => ({
         id: n.id,
-        title: n.title,
+        title:
+          n.encrypted && n.hideTitle && !workspace.secure.isUnlocked(n.id)
+            ? ''
+            : workspace.title(n),
         text: workspace.extract(n.id).plainText,
         tags: n.tags.join(' '),
       })),
     );
     return search;
   }, [workspace, revision, searching]);
-  const matches = index && ui.query ? new Set(index.search(ui.query).map((r) => r.id)) : null;
+  const remoteParts = new Map(remote.map((r) => [r.id, r.parts]));
+  const matches =
+    index && ui.query
+      ? new Set([...index.search(ui.query).map((r) => r.id), ...remoteParts.keys()])
+      : null;
   const filtered = notes
     .filter((n) => (ui.filter === 'trash' ? Boolean(n.deletedAt) : !n.deletedAt))
     .filter((n) => !matches || matches.has(n.id))
     .filter(
       (n) =>
-        ['all', 'trash', 'tasks'].includes(ui.filter) ||
+        ['all', 'trash'].includes(ui.filter) ||
+        (ui.filter === 'tasks' && workspace.extract(n.id).tasks.length > 0) ||
+        (ui.filter === 'favorites' && Boolean(n.favorite)) ||
+        (ui.filter === 'shared' && sharedIds.has(n.id)) ||
         ui.filter === n.notebookId ||
         ui.filter === n.sectionId ||
         (ui.filter.startsWith('tag:') && n.tags.includes(ui.filter.slice(4))),
@@ -244,13 +351,15 @@ function WorkspaceShell({
       ? 'Все заметки'
       : ui.filter === 'tasks'
         ? 'Задачи'
-        : ui.filter === 'shared'
-          ? 'Общие'
-          : ui.filter === 'trash'
-            ? 'Корзина'
-            : ui.filter.startsWith('tag:')
-              ? '#' + ui.filter.slice(4)
-              : currentNotebook?.name || currentSection?.name || 'Все заметки';
+        : ui.filter === 'favorites'
+          ? 'Избранное'
+          : ui.filter === 'shared'
+            ? 'Общие'
+            : ui.filter === 'trash'
+              ? 'Корзина'
+              : ui.filter.startsWith('tag:')
+                ? '#' + ui.filter.slice(4)
+                : currentNotebook?.name || currentSection?.name || 'Все заметки';
   // Группы как в макете: Закреплённые, Сегодня, Вчера, На этой неделе, затем месяцы.
   const groups = new Map<string, Note[]>();
   const captions = new Map<string, string>();
@@ -386,9 +495,47 @@ function WorkspaceShell({
       ui.toast('Список сессий доступен при подключении к серверу');
     }
   }
-  const nav = (filter: string, label: string, Icon: typeof FileText, badge?: string | number) => (
+  function moveNote(id: string, notebookId: string | null, sectionId: string | null) {
+    workspace.update(id, { notebookId, sectionId });
+    const where = sectionId
+      ? workspace.sections.get(sectionId)?.name
+      : notebookId
+        ? workspace.notebooks.get(notebookId)?.name
+        : 'Без книжки';
+    ui.toast(`Заметка перенесена: ${where}`);
+  }
+  function toTrash(id: string) {
+    workspace.update(id, { deletedAt: new Date().toISOString() });
+    if (ui.selected === id) ui.select(null);
+  }
+  /** Цель для перетаскивания заметки из списка. */
+  const dropProps = (target: string, action: (id: string) => void) => ({
+    onDragOver: (e: React.DragEvent) => {
+      if (!e.dataTransfer.types.includes(NOTE_TYPE)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      setDropTarget(target);
+    },
+    onDragLeave: () => setDropTarget((t) => (t === target ? null : t)),
+    onDrop: (e: React.DragEvent) => {
+      const id = e.dataTransfer.getData(NOTE_TYPE);
+      setDropTarget(null);
+      if (!id || !workspace.metadata.has(id)) return;
+      e.preventDefault();
+      action(id);
+    },
+  });
+  const drop = (target: string) => (dropTarget === target ? 'drop-target' : '');
+  const nav = (
+    filter: string,
+    label: string,
+    Icon: typeof FileText,
+    badge?: string | number,
+    onDropNote?: (id: string) => void,
+  ) => (
     <button
-      className={`nav-item ${ui.filter === filter ? 'selected' : ''}`}
+      className={`nav-item ${ui.filter === filter ? 'selected' : ''} ${drop(filter)}`}
+      {...(onDropNote ? dropProps(filter, onDropNote) : {})}
       onClick={() => {
         ui.setFilter(filter);
         if (filter === 'tasks') useUI.setState({ mobile: 'editor' });
@@ -428,6 +575,16 @@ function WorkspaceShell({
               CheckSquare,
               todayTasks.length ? `${todayTasks.length} сегодня` : undefined,
             )}
+            {nav(
+              'favorites',
+              'Избранное',
+              Star,
+              notes.filter((n) => !n.deletedAt && n.favorite).length || undefined,
+              (id) => {
+                workspace.update(id, { favorite: true });
+                ui.toast('Добавлено в избранное');
+              },
+            )}
             {nav('shared', 'Общие', Users)}
           </nav>
           <div className="section-heading">
@@ -442,14 +599,25 @@ function WorkspaceShell({
           </div>
           {notebooks.map((book) => (
             <div key={book.id} className="notebook">
-              <div className={`book-row ${ui.filter === book.id ? 'selected' : ''}`}>
-                <button
-                  className="collapse-button"
-                  aria-label={collapsed.has(book.id) ? 'Развернуть книжку' : 'Свернуть книжку'}
-                  onClick={() => toggleCollapse(book.id)}
-                >
-                  {collapsed.has(book.id) ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-                </button>
+              <div
+                className={`book-row ${ui.filter === book.id ? 'selected' : ''} ${drop(book.id)}`}
+                {...dropProps(book.id, (id) => moveNote(id, book.id, null))}
+              >
+                {sections.some((s) => s.notebookId === book.id) ? (
+                  <button
+                    className="collapse-button"
+                    aria-label={collapsed.has(book.id) ? 'Развернуть книжку' : 'Свернуть книжку'}
+                    onClick={() => toggleCollapse(book.id)}
+                  >
+                    {collapsed.has(book.id) ? (
+                      <ChevronRight size={14} />
+                    ) : (
+                      <ChevronDown size={14} />
+                    )}
+                  </button>
+                ) : (
+                  <span className="collapse-button" aria-hidden="true" />
+                )}
                 <button className="book-name" onClick={() => ui.setFilter(book.id)}>
                   <span
                     className="book-icon"
@@ -475,12 +643,16 @@ function WorkspaceShell({
                   </div>
                 </details>
               </div>
-              {!collapsed.has(book.id) && (
+              {!collapsed.has(book.id) && sections.some((s) => s.notebookId === book.id) && (
                 <div className="subsections">
                   {sections
                     .filter((s) => s.notebookId === book.id)
                     .map((section) => (
-                      <div key={section.id} className="subsection-row">
+                      <div
+                        key={section.id}
+                        className={`subsection-row ${drop(section.id)}`}
+                        {...dropProps(section.id, (id) => moveNote(id, book.id, section.id))}
+                      >
                         <button
                           className={ui.filter === section.id ? 'selected' : ''}
                           onClick={() => ui.setFilter(section.id)}
@@ -502,9 +674,6 @@ function WorkspaceShell({
                         </details>
                       </div>
                     ))}
-                  <button className="add-section" onClick={() => editSection(book.id)}>
-                    <Plus size={14} /> Подраздел
-                  </button>
                 </div>
               )}
             </div>
@@ -534,7 +703,7 @@ function WorkspaceShell({
           </div>
         </div>
         <div className="sidebar-bottom">
-          {nav('trash', 'Корзина', Trash2)}
+          {nav('trash', 'Корзина', Trash2, undefined, toTrash)}
           <button className="nav-item" onClick={() => void openSettings()}>
             <Settings2 size={18} />
             Настройки
@@ -618,44 +787,75 @@ function WorkspaceShell({
           </button>
         )}
         <div className="notes-scroll">
-          {ui.filter === 'shared' ? (
+          {groupList.map(([group, items]) => (
+            <section key={group} className="date-group">
+              <h2>
+                {group}
+                {captions.has(group) && <small>{captions.get(group)}</small>}
+              </h2>
+              {items.map((note) => (
+                <button
+                  key={note.id}
+                  className={`note-row ${ui.selected === note.id ? 'selected' : ''}`}
+                  onClick={() => ui.select(note.id)}
+                  draggable
+                  onDragStart={(e) => {
+                    e.dataTransfer.setData(NOTE_TYPE, note.id);
+                    e.dataTransfer.effectAllowed = 'move';
+                  }}
+                  onDragEnd={() => setDropTarget(null)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    // с клавиатуры (Shift+F10, клавиша меню) координат нет — берём строку
+                    const keyboard = e.clientX === 0 && e.clientY === 0;
+                    setMenu({
+                      id: note.id,
+                      x: keyboard ? rect.left + 24 : e.clientX,
+                      y: keyboard ? rect.top + 24 : e.clientY,
+                    });
+                  }}
+                  aria-haspopup="menu"
+                >
+                  <span className="note-row-top">
+                    <strong>
+                      {note.encrypted && <Lock size={13} aria-label="Под паролем" />}
+                      {workspace.title(note)}
+                    </strong>
+                    <time>
+                      {new Date(note.updatedAt).toLocaleTimeString('ru', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}
+                    </time>
+                  </span>
+                  <span className="note-preview">
+                    <Preview
+                      workspace={workspace}
+                      note={note}
+                      query={ui.query}
+                      remote={remoteParts.get(note.id)}
+                    />
+                  </span>
+                </button>
+              ))}
+            </section>
+          ))}
+          {!filtered.length && ui.filter === 'shared' && !ui.query && (
             <div className="empty">
               <Users size={30} />
-              <h3>Общее пространство</h3>
-              <p>Публичные ссылки и совместный доступ появятся на следующих этапах.</p>
+              <h3>Пока нет общих заметок</h3>
+              <p>Откройте заметку и нажмите «Поделиться», чтобы создать публичную ссылку.</p>
             </div>
-          ) : (
-            groupList.map(([group, items]) => (
-              <section key={group} className="date-group">
-                <h2>
-                  {group}
-                  {captions.has(group) && <small>{captions.get(group)}</small>}
-                </h2>
-                {items.map((note) => (
-                  <button
-                    key={note.id}
-                    className={`note-row ${ui.selected === note.id ? 'selected' : ''}`}
-                    onClick={() => ui.select(note.id)}
-                  >
-                    <span className="note-row-top">
-                      <strong>{note.title || 'Без названия'}</strong>
-                      <time>
-                        {new Date(note.updatedAt).toLocaleTimeString('ru', {
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })}
-                      </time>
-                    </span>
-                    <span className="note-preview">
-                      {workspace.extract(note.id).plainText.replace(/\n/g, ' ') ||
-                        'Пока здесь чистый лист'}
-                    </span>
-                  </button>
-                ))}
-              </section>
-            ))
           )}
-          {!filtered.length && ui.filter !== 'shared' && (
+          {!filtered.length && ui.filter === 'favorites' && !ui.query && (
+            <div className="empty">
+              <Star size={30} />
+              <h3>В избранном пусто</h3>
+              <p>Отметьте заметку звёздочкой или перетащите её сюда.</p>
+            </div>
+          )}
+          {!filtered.length && (ui.query || !['shared', 'favorites'].includes(ui.filter)) && (
             <div className="empty">
               <FileText size={30} />
               <h3>
@@ -663,7 +863,9 @@ function WorkspaceShell({
                   ? 'Ничего не найдено'
                   : ui.filter === 'trash'
                     ? 'Корзина пуста'
-                    : 'Здесь будут ваши заметки'}
+                    : ui.filter === 'tasks'
+                      ? 'Заметок с задачами пока нет'
+                      : 'Здесь будут ваши заметки'}
               </h3>
               <p>
                 {ui.query ? 'Попробуйте другие слова.' : 'Начните с мысли, плана или списка дел.'}
@@ -713,24 +915,72 @@ function WorkspaceShell({
                 })}
               </span>
               <div className="editor-actions">
-                <button aria-label="История" title="История" onClick={() => setHistory((v) => !v)}>
-                  История
-                </button>
+                {!selected.encrypted && (
+                  <button
+                    aria-label="История"
+                    title="История"
+                    onClick={() => setHistory((v) => !v)}
+                  >
+                    История
+                  </button>
+                )}
+                {selected.encrypted ? (
+                  workspace.secure.isUnlocked(selected.id) && (
+                    <button
+                      className="icon-button active"
+                      title="Заблокировать заметку"
+                      aria-label="Заблокировать заметку"
+                      onClick={() => workspace.secure.lock(selected.id)}
+                    >
+                      <LockOpen size={18} />
+                    </button>
+                  )
+                ) : (
+                  <button
+                    className="icon-button"
+                    title="Пароль на заметку"
+                    aria-label="Пароль на заметку"
+                    disabled={Boolean(selected.deletedAt)}
+                    onClick={() => setPassword('set')}
+                  >
+                    <Lock size={18} />
+                  </button>
+                )}
                 <button
                   className="icon-button"
-                  title="Сохранить версию"
-                  aria-label="Сохранить версию"
-                  onClick={() => {
-                    void workspace.saveVersion(selected.id);
-                    ui.toast(
-                      navigator.onLine
-                        ? 'Версия поставлена в очередь сохранения'
-                        : 'Версия сохранится на сервере после подключения',
-                    );
-                  }}
+                  title="Поделиться"
+                  aria-label="Поделиться"
+                  disabled={Boolean(selected.deletedAt)}
+                  onClick={() => setSharing(true)}
                 >
-                  <Clock3 size={18} />
+                  <Share2 size={18} />
                 </button>
+                <button
+                  className={`icon-button ${selected.favorite ? 'active' : ''}`}
+                  aria-label={selected.favorite ? 'Убрать из избранного' : 'В избранное'}
+                  title={selected.favorite ? 'Убрать из избранного' : 'В избранное'}
+                  aria-pressed={Boolean(selected.favorite)}
+                  onClick={() => workspace.update(selected.id, { favorite: !selected.favorite })}
+                >
+                  <Star size={18} fill={selected.favorite ? 'currentColor' : 'none'} />
+                </button>
+                {!selected.encrypted && (
+                  <button
+                    className="icon-button"
+                    title="Сохранить версию"
+                    aria-label="Сохранить версию"
+                    onClick={() => {
+                      void workspace.saveVersion(selected.id);
+                      ui.toast(
+                        navigator.onLine
+                          ? 'Версия поставлена в очередь сохранения'
+                          : 'Версия сохранится на сервере после подключения',
+                      );
+                    }}
+                  >
+                    <Clock3 size={18} />
+                  </button>
+                )}
                 <button
                   className={`icon-button ${selected.pinned ? 'active' : ''}`}
                   aria-label={selected.pinned ? 'Открепить заметку' : 'Закрепить заметку'}
@@ -812,6 +1062,28 @@ function WorkspaceShell({
                         <Tag size={16} />
                         Новая метка
                       </button>
+                      {selected.encrypted && workspace.secure.isUnlocked(selected.id) && (
+                        <>
+                          <button
+                            onClick={() => {
+                              setPassword('change');
+                              setMore(false);
+                            }}
+                          >
+                            <Lock size={16} />
+                            Сменить пароль
+                          </button>
+                          <button
+                            onClick={() => {
+                              setPassword('remove');
+                              setMore(false);
+                            }}
+                          >
+                            <LockOpen size={16} />
+                            Снять пароль
+                          </button>
+                        </>
+                      )}
                       {selected.deletedAt ? (
                         <button
                           onClick={() => {
@@ -875,7 +1147,7 @@ function WorkspaceShell({
                 </button>
               </div>
             ) : null}
-            {history && (
+            {history && !selected.encrypted && (
               <History
                 key={selected.id}
                 workspace={workspace}
@@ -901,6 +1173,7 @@ function WorkspaceShell({
             </button>
             <h1>Все задачи</h1>
             <p className="muted">Небольшие шаги к большим планам</p>
+            <QuickTask workspace={workspace} due={null} placeholder="Новая задача во «Входящие»" />
             {(['Сегодня', 'Просрочено', 'Предстоящие', 'Без срока', 'Выполненные'] as const).map(
               (group) => {
                 const items = tasks.filter((t) =>
@@ -917,13 +1190,25 @@ function WorkspaceShell({
                               ? dueDay(t.due) < localDate()
                               : dueDay(t.due) > localDate()),
                 );
+                const sorted =
+                  group === 'Без срока'
+                    ? [...items].sort(
+                        (a, b) =>
+                          (a.order ?? 1e6 + a.position) - (b.order ?? 1e6 + b.position) ||
+                          a.noteTitle.localeCompare(b.noteTitle),
+                      )
+                    : [...items].sort((a, b) => (a.due ?? '').localeCompare(b.due ?? ''));
                 return (
                   <div className="task-group" key={group}>
                     <h2>
                       {group}
                       <small>{items.length}</small>
                     </h2>
-                    <TaskRows tasks={items} workspace={workspace} />
+                    <TaskRows
+                      tasks={sorted}
+                      workspace={workspace}
+                      sortable={group === 'Без срока'}
+                    />
                     {!items.length && <p className="small muted">Пока нет задач</p>}
                   </div>
                 );
@@ -974,6 +1259,11 @@ function WorkspaceShell({
                     Все задачи
                   </button>
                 </div>
+                <QuickTask
+                  workspace={workspace}
+                  due={localDate()}
+                  placeholder="Добавить задачу на сегодня"
+                />
                 {todayTasks.length ? (
                   <TaskRows tasks={todayTasks} workspace={workspace} />
                 ) : (
@@ -1011,7 +1301,38 @@ function WorkspaceShell({
           </button>
         </div>
       )}
-      {dialog && <EditDialog dialog={dialog} close={() => setDialog(null)} />}{' '}
+      {dialog && <EditDialog dialog={dialog} close={() => setDialog(null)} />}
+      {password && selected && (
+        <PasswordDialog
+          workspace={workspace}
+          note={selected}
+          mode={password}
+          close={() => setPassword(null)}
+        />
+      )}
+      {sharing && selected && (
+        <ShareDialog
+          workspace={workspace}
+          note={selected}
+          close={() => {
+            setSharing(false);
+            void refreshShared();
+          }}
+        />
+      )}
+      {menu && workspace.metadata.get(menu.id) && (
+        <NoteMenu
+          note={workspace.metadata.get(menu.id)!}
+          x={menu.x}
+          y={menu.y}
+          notebooks={notebooks}
+          sections={sections}
+          close={() => setMenu(null)}
+          workspace={workspace}
+          onMove={moveNote}
+          onTrash={toTrash}
+        />
+      )}
       {settings && (
         <div className="modal-backdrop" onClick={() => setSettings(false)}>
           <section
@@ -1033,17 +1354,48 @@ function WorkspaceShell({
             </div>
             <h3>{user.name}</h3>
             <p className="muted">{user.email}</p>
+            <h3>Оформление</h3>
+            <div className="segmented" role="radiogroup" aria-label="Тема">
+              {(
+                [
+                  ['system', 'Как в системе'],
+                  ['light', 'Светлая'],
+                  ['dark', 'Тёмная'],
+                ] as [Theme, string][]
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  role="radio"
+                  aria-checked={appearance.theme === value}
+                  className={appearance.theme === value ? 'selected' : ''}
+                  onClick={() => setAppearance(value, appearance.accent)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
             <div className="settings-color">
               <span>Цвет акцента</span>
-              <ColorPicker
-                value={accent}
-                label="Цвет акцента"
-                onChange={(color) => {
-                  setAccent(color);
-                  document.documentElement.style.setProperty('--accent', color);
-                  localStorage.setItem('accent', color);
-                }}
-              />
+              <div className="color-options">
+                {ACCENTS.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    aria-label={`Акцент ${c}`}
+                    aria-pressed={appearance.accent.toLowerCase() === c.toLowerCase()}
+                    style={{ background: c }}
+                    onClick={() => setAppearance(appearance.theme, c)}
+                  >
+                    {appearance.accent.toLowerCase() === c.toLowerCase() && <Check size={18} />}
+                  </button>
+                ))}
+                <ColorPicker
+                  value={appearance.accent}
+                  label="Свой цвет акцента"
+                  onChange={(color) => setAppearance(appearance.theme, color)}
+                />
+              </div>
             </div>
             <DataSettings workspace={workspace} user={user} toast={ui.toast} />
             <h3>Сессии</h3>
@@ -1088,27 +1440,203 @@ function WorkspaceShell({
     </div>
   );
 }
+/** Контекстное меню строки списка заметок (правая кнопка, Shift+F10). */
+function NoteMenu({
+  note,
+  x,
+  y,
+  notebooks,
+  sections,
+  workspace,
+  close,
+  onMove,
+  onTrash,
+}: {
+  note: Note;
+  x: number;
+  y: number;
+  notebooks: Notebook[];
+  sections: Section[];
+  workspace: Workspace;
+  close: () => void;
+  onMove: (id: string, notebookId: string | null, sectionId: string | null) => void;
+  onTrash: (id: string) => void;
+}) {
+  const [moving, setMoving] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    ref.current?.querySelector('button')?.focus();
+  }, [moving]);
+  const left = Math.min(x, window.innerWidth - 260);
+  const top = Math.min(y, window.innerHeight - (moving ? 360 : 240));
+  const act = (fn: () => void) => () => {
+    fn();
+    close();
+  };
+  return (
+    <div
+      ref={ref}
+      className="popover context-menu"
+      role="menu"
+      style={{ left: Math.max(8, left), top: Math.max(8, top) }}
+      onKeyDown={(e) => {
+        if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+        e.preventDefault();
+        const items = [...(ref.current?.querySelectorAll('button') ?? [])];
+        const index = items.indexOf(document.activeElement as HTMLButtonElement);
+        items[(index + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length]?.focus();
+      }}
+    >
+      {moving ? (
+        <>
+          <button role="menuitem" onClick={() => setMoving(false)}>
+            <ArrowLeft size={16} />
+            Назад
+          </button>
+          <button role="menuitem" onClick={act(() => onMove(note.id, null, null))}>
+            Без книжки
+          </button>
+          {notebooks.map((book) => (
+            <div key={book.id}>
+              <button role="menuitem" onClick={act(() => onMove(note.id, book.id, null))}>
+                <Book size={15} style={{ color: book.color }} />
+                {book.name}
+              </button>
+              {sections
+                .filter((s) => s.notebookId === book.id)
+                .map((section) => (
+                  <button
+                    key={section.id}
+                    role="menuitem"
+                    className="menu-indent"
+                    onClick={act(() => onMove(note.id, book.id, section.id))}
+                  >
+                    {section.name}
+                  </button>
+                ))}
+            </div>
+          ))}
+        </>
+      ) : note.deletedAt ? (
+        <>
+          <button
+            role="menuitem"
+            onClick={act(() => workspace.update(note.id, { deletedAt: null }))}
+          >
+            <ArchiveRestore size={16} />
+            Восстановить
+          </button>
+          <button
+            role="menuitem"
+            className="danger-text"
+            onClick={act(() => {
+              if (window.confirm('Удалить заметку навсегда? Восстановить её будет невозможно.'))
+                workspace.deleteForever([note.id]);
+            })}
+          >
+            <Trash2 size={16} />
+            Удалить навсегда
+          </button>
+        </>
+      ) : (
+        <>
+          <button
+            role="menuitem"
+            onClick={act(() => workspace.update(note.id, { pinned: !note.pinned }))}
+          >
+            <Pin size={16} />
+            {note.pinned ? 'Открепить' : 'Закрепить'}
+          </button>
+          <button
+            role="menuitem"
+            onClick={act(() => workspace.update(note.id, { favorite: !note.favorite }))}
+          >
+            <Star size={16} />
+            {note.favorite ? 'Убрать из избранного' : 'В избранное'}
+          </button>
+          <button role="menuitem" onClick={() => setMoving(true)}>
+            <FolderInput size={16} />
+            Переместить…
+          </button>
+          <button role="menuitem" className="danger-text" onClick={act(() => onTrash(note.id))}>
+            <Trash2 size={16} />В корзину
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+/** Закрыть открытые меню «…» в навигации, кроме keep. */
+function closeMenus(keep?: Element | null) {
+  for (const menu of document.querySelectorAll('details.row-menu[open]'))
+    if (menu !== keep) menu.removeAttribute('open');
+}
 function ListIcon() {
   return <CheckSquare size={18} />;
 }
+type TaskItem = ReturnType<Workspace['getTasks']>[number];
 function TaskRows({
   tasks,
   workspace,
+  sortable = false,
 }: {
-  tasks: ReturnType<Workspace['getTasks']>;
+  tasks: TaskItem[];
   workspace: Workspace;
+  sortable?: boolean;
 }) {
+  const [dragging, setDragging] = useState<string | null>(null);
+  const keyOf = (t: TaskItem) => `${t.noteId}:${t.id}`;
+  const move = (from: number, to: number) => {
+    if (to < 0 || to >= tasks.length || from === to) return;
+    const keys = tasks.map(keyOf);
+    const [item] = keys.splice(from, 1);
+    keys.splice(to, 0, item);
+    workspace.setTaskOrder(keys);
+  };
   return (
     <div className="task-rows">
-      {tasks.map((task) => (
-        <div className={`task-row ${task.checked ? 'done' : ''}`} key={`${task.noteId}:${task.id}`}>
+      {tasks.map((task, index) => (
+        <div
+          className={`task-row ${task.checked ? 'done' : ''} ${dragging === keyOf(task) ? 'dragging' : ''}`}
+          key={keyOf(task)}
+          draggable={sortable}
+          onDragStart={(e) => {
+            setDragging(keyOf(task));
+            e.dataTransfer.setData('text/x-selfnote-task', String(index));
+            e.dataTransfer.effectAllowed = 'move';
+          }}
+          onDragEnd={() => setDragging(null)}
+          onDragOver={(e) => {
+            if (sortable && e.dataTransfer.types.includes('text/x-selfnote-task'))
+              e.preventDefault();
+          }}
+          onDrop={(e) => {
+            const from = Number(e.dataTransfer.getData('text/x-selfnote-task'));
+            if (Number.isInteger(from)) move(from, index);
+            setDragging(null);
+          }}
+          onKeyDown={(e) => {
+            // порядок с клавиатуры: Alt + стрелки
+            if (!sortable || !e.altKey) return;
+            if (e.key === 'ArrowUp') {
+              e.preventDefault();
+              move(index, index - 1);
+            } else if (e.key === 'ArrowDown') {
+              e.preventDefault();
+              move(index, index + 1);
+            }
+          }}
+          title={sortable ? 'Перетащите или Alt + ↑/↓, чтобы изменить порядок' : undefined}
+        >
           <label className="task-checkbox">
             <input
               type="checkbox"
               checked={task.checked}
               aria-label={`Выполнить: ${task.text || 'задача'}`}
               onChange={(e) => {
-                setTaskChecked(workspace.note(task.noteId).doc, task.id, e.target.checked);
+                const doc = workspace.noteDoc(task.noteId);
+                if (!doc) return;
+                setTaskChecked(doc, task.id, e.target.checked);
                 workspace.update(task.noteId, {});
               }}
             />
@@ -1117,11 +1645,70 @@ function TaskRows({
             <span>{task.text || 'Без названия'}</span>
             <small>{task.noteTitle}</small>
           </button>
-          {task.due && <Due due={task.due} />}
+          {task.due && <Due due={task.due} repeat={task.repeat} />}
         </div>
       ))}
     </div>
   );
+}
+/** Быстрое добавление задачи в заметку «Входящие». */
+function QuickTask({
+  workspace,
+  due,
+  placeholder,
+}: {
+  workspace: Workspace;
+  due: string | null;
+  placeholder: string;
+}) {
+  const [text, setText] = useState('');
+  return (
+    <form
+      className="quick-task"
+      onSubmit={(e) => {
+        e.preventDefault();
+        const value = text.trim();
+        if (!value) return;
+        setText('');
+        void workspace.quickTask(value, due);
+      }}
+    >
+      <Plus size={17} aria-hidden="true" />
+      <input
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder={placeholder}
+        aria-label={placeholder}
+        maxLength={500}
+      />
+      {text.trim() && (
+        <button type="submit" className="text-button">
+          Добавить
+        </button>
+      )}
+    </form>
+  );
+}
+/** Строка описания в списке: при поиске — фрагмент с подсветкой совпадения. */
+function Preview({
+  workspace,
+  note,
+  query,
+  remote,
+}: {
+  workspace: Workspace;
+  note: Note;
+  query: string;
+  remote?: SnippetPart[] | null;
+}) {
+  if (note.encrypted && !workspace.secure.isUnlocked(note.id)) return <>Содержимое зашифровано</>;
+  const text = workspace.extract(note.id).plainText;
+  const parts = query ? (snippet(text, query) ?? remote ?? null) : null;
+  if (parts)
+    return (
+      <>{parts.map((part, i) => (part.mark ? <mark key={i}>{part.text}</mark> : part.text))}</>
+    );
+  return <>{text.replace(/\n/g, ' ') || 'Пока здесь чистый лист'}</>;
 }
 function EditDialog({ dialog, close }: { dialog: Dialog; close: () => void }) {
   const [value, setValue] = useState(dialog.value);

@@ -6,6 +6,7 @@ import multipart from '@fastify/multipart';
 import websocket from '@fastify/websocket';
 import serveStatic from '@fastify/static';
 import { Hocuspocus } from '@hocuspocus/server';
+import { sql, type SqlBool } from 'kysely';
 import argon2 from 'argon2';
 import sharp from 'sharp';
 import * as Y from 'yjs';
@@ -21,8 +22,22 @@ import {
   deletedNoteIds,
   uniqueTasks,
   versionsToKeep,
+  searchTerms,
+  snippet,
+  renderDocument,
+  localDate,
+  type Note,
 } from '@selfnote/shared';
-import { db, dataDir, loadDatabase, openDatabase, activateDatabase, type DB } from './db.js';
+import {
+  db,
+  dbType,
+  dataDir,
+  loadDatabase,
+  openDatabase,
+  activateDatabase,
+  type DB,
+} from './db.js';
+import { shareAssets, sharePage, unavailablePage, SHARE_CSP } from './share-page.js';
 import {
   backupDir,
   backupHour,
@@ -50,6 +65,7 @@ if (!secret) {
   }
 }
 await loadDatabase();
+const webRoot = fileURLToPath(new URL('../../web/dist/', import.meta.url));
 const app = Fastify({
   logger: true,
   bodyLimit: 1024 * 1024,
@@ -60,6 +76,12 @@ await app.register(jwt, { secret });
 await app.register(rateLimit, { global: false });
 await app.register(multipart, { limits: { fileSize: 20 * 1024 * 1024, files: 1 } });
 await app.register(websocket, { options: { maxPayload: 24 * 1024 * 1024 } });
+// Форма пароля публичной ссылки работает и без JavaScript.
+app.addContentTypeParser(
+  'application/x-www-form-urlencoded',
+  { parseAs: 'string', bodyLimit: 4096 },
+  (_request, body, done) => done(null, Object.fromEntries(new URLSearchParams(String(body)))),
+);
 const secure = process.env.COOKIE_SECURE === 'true';
 const cookieOptions = {
   httpOnly: true,
@@ -324,6 +346,8 @@ async function authorizeDocument(name: string, owner: string) {
     .where('note_id', '=', name.slice(5))
     .executeTakeFirst();
   if (purged) throw Object.assign(new Error('Заметка удалена навсегда'), { statusCode: 410 });
+  if (await encryptedRow(name.slice(5)))
+    throw Object.assign(new Error('Заметка под паролем'), { statusCode: 409 });
   const row = await database()
     .selectFrom('yjs_documents')
     .select('owner_id')
@@ -341,14 +365,23 @@ function serializeDocuments<T>(operation: () => Promise<T>): Promise<T> {
 function saveDocument(name: string, document: Y.Doc, owner: string) {
   return serializeDocuments(() => storeDocument(name, document, owner));
 }
+async function encryptedRow(noteId: string) {
+  return database()
+    .selectFrom('encrypted_notes')
+    .selectAll()
+    .where('note_id', '=', noteId)
+    .executeTakeFirst();
+}
 async function storeDocument(name: string, document: Y.Doc, owner: string) {
   if (
     name.startsWith('note:') &&
-    (await database()
+    ((await database()
       .selectFrom('purged_notes')
       .select('note_id')
       .where('note_id', '=', name.slice(5))
-      .executeTakeFirst())
+      .executeTakeFirst()) ||
+      // заметку только что закрыли паролем — открытый текст больше не сохраняем
+      (await encryptedRow(name.slice(5))))
   )
     return;
   await authorizeDocument(name, owner);
@@ -411,6 +444,8 @@ async function storeDocument(name: string, document: Y.Doc, owner: string) {
           await trx.deleteFrom('tasks').where('note_id', '=', id).execute();
           await trx.deleteFrom('note_versions').where('note_id', '=', id).execute();
           await trx.deleteFrom('notes_index').where('note_id', '=', id).execute();
+          await trx.deleteFrom('encrypted_notes').where('note_id', '=', id).execute();
+          await trx.deleteFrom('shares').where('note_id', '=', id).execute();
         }
         const deleted = [...deletedNoteIds(document)];
         let restore = trx
@@ -881,6 +916,13 @@ async function cleanTrash() {
       .executeTakeFirst();
     if (row) collect(doc, row.owner_id);
   }
+  // картинки заметок под паролем: сервер не видит содержимое, список присылает клиент
+  for (const row of await database()
+    .selectFrom('encrypted_notes')
+    .select(['owner_id', 'attachments'])
+    .execute())
+    for (const id of JSON.parse(row.attachments || '[]') as string[])
+      used.add(`${row.owner_id}:${id}`);
   const attachments = await database()
     .selectFrom('attachments')
     .selectAll()
@@ -913,6 +955,491 @@ async function runCleanup() {
 }
 const cleanupTimer = setInterval(() => void runCleanup(), 86400000);
 cleanupTimer.unref();
+
+// ===== Серверный поиск =====
+app.get('/api/search', async (request) => {
+  const owner = await userId(request);
+  const { q } = z.object({ q: z.string().max(200) }).parse(request.query);
+  const terms = searchTerms(q);
+  if (!terms.length) return [];
+  let rows: { note_id: string; plain_text: string }[];
+  if (dbType === 'mariadb') {
+    // FULLTEXT не индексирует слова короче 3 букв — их ищем через LIKE
+    const long = terms.filter((t) => t.length >= 3);
+    const short = terms.filter((t) => t.length < 3);
+    let query = database()
+      .selectFrom('notes_index')
+      .select(['note_id', 'plain_text'])
+      .where('owner_id', '=', owner)
+      .where('deleted', '=', 0);
+    if (long.length)
+      query = query.where(
+        sql<SqlBool>`MATCH(plain_text) AGAINST(${long.map((t) => `+${t}*`).join(' ')} IN BOOLEAN MODE)`,
+      );
+    for (const term of short) query = query.where('plain_text', 'like', `%${term}%`);
+    rows = await query.orderBy('updated_at', 'desc').limit(50).execute();
+  } else {
+    const match = terms.map((t) => `"${t}"*`).join(' ');
+    rows = (
+      await sql<{ note_id: string; plain_text: string }>`
+        SELECT n.note_id, n.plain_text FROM notes_fts
+        JOIN notes_index n ON n.rowid = notes_fts.rowid
+        WHERE notes_fts MATCH ${match} AND n.owner_id = ${owner} AND n.deleted = 0
+        ORDER BY rank LIMIT 50`.execute(database())
+    ).rows;
+  }
+  return rows.map((row) => ({ id: row.note_id, parts: snippet(row.plain_text, q) }));
+});
+
+// ===== Заметки под паролем =====
+// Сервер хранит непрозрачный зашифрованный снапшот с номером версии. Запись — только
+// поверх известной клиенту версии; иначе 409 с актуальной копией (клиент сливает правки).
+app.get('/api/encrypted', async (request) => {
+  const owner = await userId(request);
+  return database()
+    .selectFrom('encrypted_notes')
+    .select(['note_id', 'version', 'updated_at'])
+    .where('owner_id', '=', owner)
+    .execute();
+});
+app.get('/api/encrypted/:id', async (request, reply) => {
+  const owner = await userId(request);
+  const id = z.uuid().parse((request.params as { id: string }).id);
+  const row = await encryptedRow(id);
+  if (!row || row.owner_id !== owner)
+    return reply.code(404).send({ message: 'Заметка не найдена' });
+  return {
+    note_id: row.note_id,
+    version: row.version,
+    payload: row.payload,
+    updated_at: row.updated_at,
+  };
+});
+const encryptedInput = z.object({
+  version: z.number().int().min(0),
+  payload: z
+    .string()
+    .min(10)
+    .max(30 * 1024 * 1024),
+  attachments: z
+    .array(z.string().regex(/^[a-f0-9]{64}$/))
+    .max(5000)
+    .default([]),
+});
+app.put('/api/encrypted/:id', { bodyLimit: 32 * 1024 * 1024 }, async (request, reply) => {
+  const owner = await userId(request);
+  const id = z.uuid().parse((request.params as { id: string }).id);
+  const input = encryptedInput.parse(request.body);
+  try {
+    const envelope = JSON.parse(input.payload);
+    if (envelope?.v !== 1 || typeof envelope.data !== 'string') throw new Error();
+  } catch {
+    return reply.code(400).send({ message: 'Ожидаются зашифрованные данные' });
+  }
+  return serializeDocuments(async () => {
+    if (
+      await database()
+        .selectFrom('purged_notes')
+        .select('note_id')
+        .where('note_id', '=', id)
+        .executeTakeFirst()
+    )
+      return reply.code(410).send({ message: 'Заметка удалена навсегда' });
+    const now = new Date().toISOString();
+    const attachments = JSON.stringify(input.attachments);
+    const row = await encryptedRow(id);
+    if (row && row.owner_id !== owner) return reply.code(403).send({ message: 'Нет доступа' });
+    if (!row) {
+      if (input.version !== 0)
+        return reply.code(409).send({ message: 'С заметки сняли пароль', version: 0 });
+      const plain = await database()
+        .selectFrom('yjs_documents')
+        .select('owner_id')
+        .where('name', '=', `note:${id}`)
+        .executeTakeFirst();
+      if (plain && plain.owner_id !== owner)
+        return reply.code(403).send({ message: 'Нет доступа' });
+      // Закрываем паролем: открытый текст, задачи и история версий удаляются с сервера.
+      await database()
+        .transaction()
+        .execute(async (trx) => {
+          await trx
+            .insertInto('encrypted_notes')
+            .values({
+              note_id: id,
+              owner_id: owner,
+              version: 1,
+              payload: input.payload,
+              attachments,
+              updated_at: now,
+            })
+            .execute();
+          await trx.deleteFrom('yjs_documents').where('name', '=', `note:${id}`).execute();
+          await trx.deleteFrom('notes_index').where('note_id', '=', id).execute();
+          await trx.deleteFrom('tasks').where('note_id', '=', id).execute();
+          await trx.deleteFrom('note_versions').where('note_id', '=', id).execute();
+          await trx.deleteFrom('shares').where('note_id', '=', id).execute();
+        });
+      collab.closeConnections(`note:${id}`);
+      return { version: 1, updated_at: now };
+    }
+    if (row.version !== input.version)
+      return reply.code(409).send({
+        message: 'Заметку изменили на другом устройстве',
+        version: row.version,
+        payload: row.payload,
+      });
+    await database()
+      .updateTable('encrypted_notes')
+      .set({ version: row.version + 1, payload: input.payload, attachments, updated_at: now })
+      .where('note_id', '=', id)
+      .execute();
+    return { version: row.version + 1, updated_at: now };
+  });
+});
+/** Снять пароль: клиент затем отправит открытый документ по WebSocket. */
+app.delete('/api/encrypted/:id', async (request, reply) => {
+  const owner = await userId(request);
+  const id = z.uuid().parse((request.params as { id: string }).id);
+  return serializeDocuments(async () => {
+    const row = await encryptedRow(id);
+    if (!row || row.owner_id !== owner)
+      return reply.code(404).send({ message: 'Заметка не найдена' });
+    await database()
+      .transaction()
+      .execute(async (trx) => {
+        await trx.deleteFrom('encrypted_notes').where('note_id', '=', id).execute();
+        await trx.deleteFrom('shares').where('note_id', '=', id).execute();
+      });
+    return { ok: true };
+  });
+});
+
+// ===== Публичные ссылки =====
+/** Метаданные заметки из документа пространства владельца (название, корзина). */
+async function spaceNote(owner: string, noteId: string): Promise<Note | null> {
+  let doc = collab.documents.get(`space:${owner}`) as Y.Doc | undefined;
+  let temporary: Y.Doc | undefined;
+  if (!doc) {
+    const row = await database()
+      .selectFrom('yjs_documents')
+      .select('state')
+      .where('name', '=', `space:${owner}`)
+      .executeTakeFirst();
+    if (!row) return null;
+    temporary = doc = new Y.Doc();
+    Y.applyUpdate(doc, row.state);
+  }
+  try {
+    const value = doc.getMap<unknown>('notes').get(noteId);
+    if (!value) return null;
+    return (value instanceof Y.Map ? value.toJSON() : value) as Note;
+  } finally {
+    temporary?.destroy();
+  }
+}
+/** Документ заметки: живой (если открыт кем-то) или сохранённый. */
+async function noteDocument(noteId: string): Promise<{ doc: Y.Doc; release: () => void } | null> {
+  const live = collab.documents.get(`note:${noteId}`) as Y.Doc | undefined;
+  if (live) return { doc: live, release: () => undefined };
+  const row = await database()
+    .selectFrom('yjs_documents')
+    .select('state')
+    .where('name', '=', `note:${noteId}`)
+    .executeTakeFirst();
+  if (!row) return null;
+  const doc = new Y.Doc();
+  Y.applyUpdate(doc, row.state);
+  return { doc, release: () => doc.destroy() };
+}
+async function ownedNoteKind(id: string, owner: string): Promise<'plain' | 'encrypted' | null> {
+  const encrypted = await encryptedRow(id);
+  if (encrypted) return encrypted.owner_id === owner ? 'encrypted' : null;
+  const row = await database()
+    .selectFrom('yjs_documents')
+    .select('owner_id')
+    .where('name', '=', `note:${id}`)
+    .executeTakeFirst();
+  return row?.owner_id === owner ? 'plain' : null;
+}
+const shareColumns = [
+  'id',
+  'token',
+  'note_id',
+  'expires_at',
+  'encrypted',
+  'views',
+  'created_at',
+  'password_hash',
+] as const;
+type ShareRow = { password_hash: string | null } & Record<string, unknown>;
+const publicShare = ({ password_hash, ...rest }: ShareRow) => ({
+  ...rest,
+  has_password: Boolean(password_hash),
+});
+app.get('/api/shares', async (request) => {
+  const owner = await userId(request);
+  const rows = await database()
+    .selectFrom('shares')
+    .select(shareColumns)
+    .where('owner_id', '=', owner)
+    .orderBy('created_at', 'desc')
+    .execute();
+  return rows.map(publicShare);
+});
+app.get('/api/notes/:id/shares', async (request) => {
+  const owner = await userId(request);
+  const id = z.uuid().parse((request.params as { id: string }).id);
+  const rows = await database()
+    .selectFrom('shares')
+    .select(shareColumns)
+    .where('owner_id', '=', owner)
+    .where('note_id', '=', id)
+    .orderBy('created_at', 'desc')
+    .execute();
+  return rows.map(publicShare);
+});
+app.post('/api/notes/:id/shares', async (request, reply) => {
+  const owner = await userId(request);
+  const id = z.uuid().parse((request.params as { id: string }).id);
+  const input = z
+    .object({
+      password: z.string().min(4).max(128).nullish(),
+      expiresAt: z.iso.datetime({ offset: true }).nullish(),
+    })
+    .parse(request.body);
+  const kind = await ownedNoteKind(id, owner);
+  if (!kind) return reply.code(404).send({ message: 'Дождитесь синхронизации заметки с сервером' });
+  if (input.expiresAt && Date.parse(input.expiresAt) <= Date.now())
+    return reply.code(400).send({ message: 'Срок действия должен быть в будущем' });
+  const row = {
+    id: randomUUID(),
+    token: randomBytes(32).toString('base64url'),
+    note_id: id,
+    owner_id: owner,
+    password_hash: input.password
+      ? await argon2.hash(input.password, { type: argon2.argon2id })
+      : null,
+    expires_at: input.expiresAt ? new Date(input.expiresAt).toISOString() : null,
+    encrypted: kind === 'encrypted' ? 1 : 0,
+    created_at: new Date().toISOString(),
+  };
+  await database().insertInto('shares').values(row).execute();
+  return publicShare({ ...row, views: 0 });
+});
+app.delete('/api/shares/:id', async (request) => {
+  const owner = await userId(request);
+  const id = z.uuid().parse((request.params as { id: string }).id);
+  await database()
+    .deleteFrom('shares')
+    .where('id', '=', id)
+    .where('owner_id', '=', owner)
+    .execute();
+  return { ok: true };
+});
+
+type Share = NonNullable<Awaited<ReturnType<typeof findShare>>>;
+async function findShare(token: string) {
+  if (!db || !/^[A-Za-z0-9_-]{43}$/.test(token)) return null;
+  const share = await database()
+    .selectFrom('shares')
+    .selectAll()
+    .where('token', '=', token)
+    .executeTakeFirst();
+  if (!share || (share.expires_at && Date.parse(share.expires_at) <= Date.now())) return null;
+  const meta = await spaceNote(share.owner_id, share.note_id);
+  if (!meta || meta.deletedAt) return null;
+  const encrypted = await encryptedRow(share.note_id);
+  // заметку закрыли паролем или сняли пароль после создания ссылки — ссылка устарела
+  if (Boolean(encrypted) !== Boolean(share.encrypted)) return null;
+  return { share, meta, encrypted };
+}
+const shareCookie = (share: { id: string }) => `share_${share.id.replace(/-/g, '')}`;
+function shareUnlocked(request: import('fastify').FastifyRequest, share: Share['share']) {
+  if (!share.password_hash) return true;
+  const value = request.cookies[shareCookie(share)];
+  if (!value) return false;
+  try {
+    return app.jwt.verify<{ share?: string }>(value).share === share.id;
+  } catch {
+    return false;
+  }
+}
+const shareFails = new Map<string, { count: number; until: number }>();
+function sendPage(reply: import('fastify').FastifyReply, html: string, status = 200) {
+  return reply
+    .code(status)
+    .header('Content-Type', 'text/html; charset=utf-8')
+    .header('Content-Security-Policy', SHARE_CSP)
+    .header('X-Robots-Tag', 'noindex, nofollow')
+    .header('Referrer-Policy', 'no-referrer')
+    .header('X-Content-Type-Options', 'nosniff')
+    .header('Cache-Control', 'no-store')
+    .send(html);
+}
+const origin = (request: import('fastify').FastifyRequest) =>
+  process.env.APP_ORIGIN || `${request.protocol}://${request.host}`;
+app.get('/s/:token', async (request, reply) => {
+  const token = (request.params as { token: string }).token;
+  const assets = await shareAssets(webRoot);
+  const found = await findShare(token);
+  if (!found) return sendPage(reply, unavailablePage(assets), 404);
+  const { share, meta } = found;
+  const locked = !shareUnlocked(request, share);
+  const error = (request.query as { error?: string }).error ? 'Неверный пароль' : undefined;
+  const url = `${origin(request)}/s/${token}`;
+  if (share.encrypted || locked) {
+    // содержимое не раскрываем в превью: ни для пароля ссылки, ни для шифрованной заметки
+    if (!locked)
+      await database()
+        .updateTable('shares')
+        .set({ views: sql`views + 1` })
+        .where('id', '=', share.id)
+        .execute();
+    return sendPage(
+      reply,
+      sharePage({
+        token,
+        title: share.encrypted ? 'Заметка под паролем' : meta.title || 'Заметка',
+        description: 'Заметка защищена паролем',
+        url,
+        body: share.encrypted ? '<p class="share-status">Расшифровываем заметку…</p>' : '',
+        encrypted: Boolean(share.encrypted),
+        locked,
+        error,
+        updatedAt: meta.updatedAt,
+        assets,
+      }),
+    );
+  }
+  const note = await noteDocument(share.note_id);
+  if (!note) return sendPage(reply, unavailablePage(assets), 404);
+  try {
+    const rendered = renderDocument(note.doc.getXmlFragment('content'), {
+      today: localDate(),
+      image: (src) =>
+        src.startsWith('/api/attachments/') ? `/s/${token}/img/${src.split('/')[3]}` : null,
+    });
+    const firstImage = rendered.images.find((src) => src.startsWith('/api/attachments/'));
+    await database()
+      .updateTable('shares')
+      .set({ views: sql`views + 1` })
+      .where('id', '=', share.id)
+      .execute();
+    return sendPage(
+      reply,
+      sharePage({
+        token,
+        title: meta.title || 'Без названия',
+        description: rendered.text.replace(/\s+/g, ' ').slice(0, 200) || 'Заметка в SelfNote',
+        image: firstImage ? `${origin(request)}/s/${token}/img/${firstImage.split('/')[3]}` : null,
+        url,
+        updatedAt: meta.updatedAt,
+        body: rendered.html || '<p class="share-status">Заметка пока пустая.</p>',
+        encrypted: false,
+        locked: false,
+        assets,
+      }),
+    );
+  } finally {
+    note.release();
+  }
+});
+app.post(
+  '/s/:token/unlock',
+  { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } },
+  async (request, reply) => {
+    const token = (request.params as { token: string }).token;
+    const json = !String(request.headers['content-type'] ?? '').includes('urlencoded');
+    const found = await findShare(token);
+    if (!found)
+      return json
+        ? reply.code(404).send({ message: 'Ссылка недоступна' })
+        : reply.redirect(`/s/${token}`, 303);
+    const { share } = found;
+    const { password } = z
+      .object({ password: z.string().max(256).default('') })
+      .parse(request.body ?? {});
+    const now = Date.now();
+    const state = shareFails.get(share.id);
+    if (state && state.count >= 10 && state.until > now)
+      return json
+        ? reply.code(429).send({ message: 'Слишком много попыток. Попробуйте через 15 минут' })
+        : sendPage(
+            reply,
+            unavailablePage(await shareAssets(webRoot), 'Слишком много попыток'),
+            429,
+          );
+    if (share.password_hash && !(await argon2.verify(share.password_hash, password))) {
+      shareFails.set(share.id, {
+        count: state && state.until > now ? state.count + 1 : 1,
+        until: now + 15 * 60000,
+      });
+      return json
+        ? reply.code(401).send({ message: 'Неверный пароль' })
+        : reply.redirect(`/s/${token}?error=1`, 303);
+    }
+    shareFails.delete(share.id);
+    if (share.password_hash)
+      reply.setCookie(shareCookie(share), app.jwt.sign({ share: share.id }, { expiresIn: '12h' }), {
+        httpOnly: true,
+        secure,
+        sameSite: 'lax',
+        path: `/s/${token}`,
+        maxAge: 12 * 3600,
+      });
+    return json ? { ok: true } : reply.redirect(`/s/${token}`, 303);
+  },
+);
+/** Зашифрованное содержимое для страницы ссылки — расшифровывает браузер ключом из #фрагмента. */
+app.get('/s/:token/data', async (request, reply) => {
+  const token = (request.params as { token: string }).token;
+  const found = await findShare(token);
+  if (!found || !found.encrypted) return reply.code(404).send({ message: 'Ссылка недоступна' });
+  if (!shareUnlocked(request, found.share))
+    return reply.code(401).send({ message: 'Нужен пароль ссылки' });
+  reply.header('Cache-Control', 'no-store');
+  return {
+    payload: found.encrypted.payload,
+    updated_at: found.encrypted.updated_at,
+    hideTitle: Boolean(found.meta.hideTitle),
+    title: found.meta.hideTitle ? '' : found.meta.title,
+  };
+});
+app.get('/s/:token/img/:id', async (request, reply) => {
+  const { token, id } = request.params as { token: string; id: string };
+  if (!/^[a-f0-9]{64}$/.test(id)) return reply.code(404).send();
+  const found = await findShare(token);
+  if (!found || !shareUnlocked(request, found.share)) return reply.code(404).send();
+  // отдаём только картинки этой заметки
+  let referenced = false;
+  if (found.encrypted)
+    referenced = (JSON.parse(found.encrypted.attachments) as string[]).includes(id);
+  else {
+    const note = await noteDocument(found.share.note_id);
+    if (note)
+      try {
+        referenced = renderDocument(note.doc.getXmlFragment('content')).images.includes(
+          `/api/attachments/${id}`,
+        );
+      } finally {
+        note.release();
+      }
+  }
+  if (!referenced) return reply.code(404).send();
+  const row = await database()
+    .selectFrom('attachments')
+    .select('id')
+    .where('id', '=', id)
+    .where('owner_id', '=', found.share.owner_id)
+    .executeTakeFirst();
+  if (!row) return reply.code(404).send();
+  reply.header('Cache-Control', 'private, max-age=3600');
+  reply.header('X-Content-Type-Options', 'nosniff');
+  return reply
+    .type('image/webp')
+    .send(await readFile(path.join(dataDir, 'attachments', found.share.owner_id, `${id}.webp`)));
+});
 
 // ===== Резервные копии =====
 async function requireAdmin(request: import('fastify').FastifyRequest) {
@@ -1069,7 +1596,6 @@ app.post(
   },
 );
 await runCleanup();
-const webRoot = fileURLToPath(new URL('../../web/dist/', import.meta.url));
 try {
   await access(webRoot);
   await app.register(serveStatic, { root: webRoot });

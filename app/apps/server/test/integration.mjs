@@ -382,6 +382,164 @@ try {
     '✓ Резервная копия: создание, скачивание, восстановление и копия перед восстановлением',
   );
 
+  // ===== Этап 2: серверный поиск =====
+  // после восстановления из копии прежние клиенты переподключаются с задержкой — берём новое соединение
+  const spaceLive = connect(`space:${owner.user.id}`, owner.accessToken);
+  await waitFor(() => spaceLive.provider.isSynced, 'пространство');
+  const searchId = randomUUID();
+  const searchNote = connect(`note:${searchId}`, owner.accessToken);
+  await waitFor(() => searchNote.provider.isSynced, 'заметка для поиска');
+  const sp = new Y.XmlElement('paragraph'),
+    st = new Y.XmlText();
+  st.insert(0, 'Плейлист для утреннего эфира и джинглы');
+  sp.insert(0, [st]);
+  searchNote.doc.getXmlFragment('content').insert(0, [sp]);
+  spaceLive.doc.getMap('notes').set(
+    searchId,
+    new Y.Map([
+      ['title', 'Публичная заметка'],
+      ['deletedAt', null],
+    ]),
+  );
+  let found = [];
+  await waitFor(async () => {
+    found = await (
+      await request(
+        `/api/search?q=${encodeURIComponent('утрен ДЖИНГ')}`,
+        undefined,
+        owner.accessToken,
+      )
+    ).json();
+    return found.some((r) => r.id === searchId);
+  }, 'серверный поиск');
+  assert.ok(found[0].parts.some((p) => p.mark && p.text.toLowerCase().startsWith('утрен')));
+  assert.deepEqual(
+    await (await request('/api/search?q=несуществующее', undefined, owner.accessToken)).json(),
+    [],
+  );
+  console.log('✓ Серверный поиск: по началу слова, без регистра, с фрагментом');
+
+  // ===== Публичные ссылки =====
+  r = await request(`/api/notes/${searchId}/shares`, {}, owner.accessToken);
+  assert.equal(r.status, 200);
+  const share = await r.json();
+  assert.equal(share.has_password, false);
+  let page;
+  await waitFor(async () => {
+    page = await fetch(`${base}/s/${share.token}`);
+    return page.status === 200;
+  }, 'публичная страница');
+  let html = await page.text();
+  assert.ok(html.includes('Публичная заметка') && html.includes('утреннего эфира'));
+  assert.ok(html.includes('og:title') && page.headers.get('content-security-policy'));
+  assert.equal((await fetch(`${base}/s/${'x'.repeat(43)}`)).status, 404);
+  r = await request(`/api/notes/${searchId}/shares`, { password: 'секрет-1' }, owner.accessToken);
+  const locked = await r.json();
+  html = await (await fetch(`${base}/s/${locked.token}`)).text();
+  assert.ok(html.includes('защищена паролем') && !html.includes('утреннего эфира'));
+  assert.equal((await request(`/s/${locked.token}/unlock`, { password: 'неверный' })).status, 401);
+  r = await request(`/s/${locked.token}/unlock`, { password: 'секрет-1' });
+  assert.equal(r.status, 200);
+  const shareCookie = r.headers.get('set-cookie').split(';')[0];
+  html = await (
+    await fetch(`${base}/s/${locked.token}`, { headers: { Cookie: shareCookie } })
+  ).text();
+  assert.ok(html.includes('утреннего эфира'));
+  const shares = await (await request('/api/shares', undefined, owner.accessToken)).json();
+  assert.equal(shares.length, 2);
+  assert.ok(shares.every((s) => !('password_hash' in s)));
+  assert.equal(
+    (await request(`/api/shares/${share.id}`, undefined, owner.accessToken, undefined, 'DELETE'))
+      .status,
+    200,
+  );
+  assert.equal((await fetch(`${base}/s/${share.token}`)).status, 404);
+  spaceLive.doc.getMap('notes').get(searchId).set('deletedAt', new Date().toISOString());
+  await waitFor(
+    async () =>
+      (await fetch(`${base}/s/${locked.token}`, { headers: { Cookie: shareCookie } })).status ===
+      404,
+    'ссылка на заметку в корзине',
+  );
+  spaceLive.doc.getMap('notes').get(searchId).set('deletedAt', null);
+  console.log('✓ Публичные ссылки: страница, превью, пароль ссылки, отзыв, корзина');
+
+  // ===== Заметки под паролем =====
+  const envelope = (data) =>
+    JSON.stringify({
+      v: 1,
+      kdf: { name: 'PBKDF2', hash: 'SHA-256', iterations: 1000, salt: 'AAAA' },
+      iv: 'AAAA',
+      data,
+    });
+  const put = (id, body) =>
+    fetch(`${base}/api/encrypted/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${owner.accessToken}` },
+      body: JSON.stringify(body),
+    });
+  // закрываем паролем существующую заметку: открытый текст и история удаляются
+  r = await put(searchId, { version: 0, payload: envelope('шифр-1'), attachments: [] });
+  assert.equal(r.status, 200);
+  assert.equal((await r.json()).version, 1);
+  const checkDb = new SQLite(path.join(data, 'selfnote.sqlite'));
+  await waitFor(
+    () => !checkDb.prepare('select name from yjs_documents where name = ?').get(`note:${searchId}`),
+    'открытый текст удалён',
+  );
+  for (const table of ['notes_index', 'note_versions', 'tasks', 'shares'])
+    assert.equal(
+      checkDb.prepare(`select count(*) as n from ${table} where note_id = ?`).get(searchId).n,
+      0,
+    );
+  checkDb.close();
+  assert.deepEqual(
+    await (await request(`/api/search?q=утрен`, undefined, owner.accessToken)).json(),
+    [],
+  );
+  let encryptedDenied = false;
+  const reopen = connect(`note:${searchId}`, owner.accessToken);
+  reopen.provider.on('authenticationFailed', () => (encryptedDenied = true));
+  await waitFor(() => encryptedDenied, 'WebSocket не отдаёт заметку под паролем');
+  r = await put(searchId, { version: 0, payload: envelope('устаревшая'), attachments: [] });
+  assert.equal(r.status, 409);
+  const conflict = await r.json();
+  assert.equal(conflict.version, 1);
+  assert.ok(conflict.payload.includes('шифр-1'));
+  r = await put(searchId, {
+    version: 1,
+    payload: envelope('шифр-2'),
+    attachments: ['a'.repeat(64)],
+  });
+  assert.equal((await r.json()).version, 2);
+  assert.equal((await put(searchId, { version: 2, payload: 'не конверт' })).status, 400);
+  const listed = await (await request('/api/encrypted', undefined, owner.accessToken)).json();
+  assert.deepEqual(
+    listed.map((n) => [n.note_id, n.version]),
+    [[searchId, 2]],
+  );
+  // ссылка на зашифрованную заметку: страница без содержимого, шифр — отдельно
+  const secret = await (
+    await request(`/api/notes/${searchId}/shares`, {}, owner.accessToken)
+  ).json();
+  assert.equal(secret.encrypted, 1);
+  html = await (await fetch(`${base}/s/${secret.token}`)).text();
+  assert.ok(html.includes('data-encrypted="1"') && !html.includes('Публичная заметка'));
+  const secretData = await (await fetch(`${base}/s/${secret.token}/data`)).json();
+  assert.ok(secretData.payload.includes('шифр-2'));
+  // снять пароль: заметка снова принимается по WebSocket
+  assert.equal(
+    (await request(`/api/encrypted/${searchId}`, undefined, owner.accessToken, undefined, 'DELETE'))
+      .status,
+    200,
+  );
+  assert.equal((await fetch(`${base}/s/${secret.token}`)).status, 404);
+  const plainAgain = connect(`note:${searchId}`, owner.accessToken);
+  await waitFor(() => plainAgain.provider.isSynced, 'заметка без пароля снова синхронизируется');
+  console.log(
+    '✓ Заметки под паролем: шифр вместо текста, версии и конфликт, ссылка, снятие пароля',
+  );
+
   const csrf = await fetch(base + '/api/auth/logout', {
     method: 'POST',
     headers: { Origin: 'https://foreign.example', Cookie: cookie },

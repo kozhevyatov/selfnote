@@ -5,6 +5,6 @@ import '@fontsource/golos-text/600.css';
 import '@fontsource/golos-text/700.css';
 import App from './App';
 import './styles.css';
-const accent = localStorage.getItem('accent');
-if (accent) document.documentElement.style.setProperty('--accent', accent);
+import { initAppearance } from './theme';
+initAppearance();
 createRoot(document.getElementById('root')!).render(<App />);

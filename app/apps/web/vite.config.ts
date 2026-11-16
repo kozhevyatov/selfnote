@@ -26,7 +26,13 @@ export default defineConfig({
     }),
   ],
   build: {
+    // манифест нужен серверу, чтобы подключить скрипт публичной страницы /s/<token>
+    manifest: true,
     rollupOptions: {
+      input: {
+        main: 'index.html',
+        share: 'src/share/main.ts',
+      },
       output: {
         manualChunks(id) {
           if (id.includes('/node_modules/')) {
@@ -49,6 +55,7 @@ export default defineConfig({
     proxy: {
       '/api': { target: 'http://127.0.0.1:1339' },
       '/collab': { target: 'ws://127.0.0.1:1339', ws: true },
+      '/s/': { target: 'http://127.0.0.1:1339' },
     },
   },
 });

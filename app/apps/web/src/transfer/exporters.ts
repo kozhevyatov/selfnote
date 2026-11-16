@@ -32,12 +32,35 @@ const safe = (name: string) =>
     .slice(0, 80) || 'Без названия';
 const stamp = () => new Date().toISOString().slice(0, 10);
 
+/**
+ * Заметки для экспорта. Заметки под паролем попадают в архив только открытыми
+ * (и тогда — в расшифрованном виде), закрытые пропускаются.
+ */
 function notesFor(workspace: Workspace, notebookId?: string | null) {
-  return [...workspace.metadata.values()].filter(
-    (n) => !n.deletedAt && (notebookId === undefined || n.notebookId === notebookId),
-  );
+  return [...workspace.metadata.values()]
+    .filter(
+      (n) =>
+        !n.deletedAt &&
+        (notebookId === undefined || n.notebookId === notebookId) &&
+        (!n.encrypted || workspace.secure.isUnlocked(n.id)),
+    )
+    .map((n) => (n.encrypted && n.hideTitle ? { ...n, title: workspace.title(n) } : n));
+}
+function lockedWarning(workspace: Workspace, warnings: string[]) {
+  const locked = [...workspace.metadata.values()].filter(
+    (n) => !n.deletedAt && n.encrypted && !workspace.secure.isUnlocked(n.id),
+  ).length;
+  if (locked)
+    warnings.push(
+      `Заметки под паролем (${locked}) пропущены — откройте их перед экспортом, чтобы включить в архив`,
+    );
 }
 async function content(workspace: Workspace, note: Note): Promise<PMNode> {
+  if (note.encrypted) {
+    const doc = workspace.secure.doc(note.id);
+    if (!doc) throw new Error('Заметка под паролем закрыта');
+    return yDocToProsemirrorJSON(doc, 'content') as PMNode;
+  }
   const entry = workspace.note(note.id);
   await entry.ready;
   return yDocToProsemirrorJSON(entry.doc, 'content') as PMNode;
@@ -81,6 +104,7 @@ export async function exportMarkdown(
   const warnings: string[] = [];
   const images = new Images(workspace.userId, warnings);
   const notes = notesFor(workspace, notebookId);
+  lockedWarning(workspace, warnings);
   const files: ZipInput[] = [];
   const used = new Set<string>();
   let done = 0;
@@ -136,6 +160,7 @@ export async function exportSelfnote(
   const warnings: string[] = [];
   const images = new Images(workspace.userId, warnings);
   const notes = notesFor(workspace);
+  lockedWarning(workspace, warnings);
   const out = [];
   let done = 0;
   for (const note of notes) {

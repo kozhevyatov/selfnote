@@ -44,7 +44,10 @@ export async function api<T>(url: string, options: RequestInit = {}, retry = tru
   }
   if (!response.ok) {
     const error = await response.json().catch(() => ({ message: 'Ошибка соединения' }));
-    throw new Error(error.message || 'Не удалось выполнить запрос');
+    throw Object.assign(new Error(error.message || 'Не удалось выполнить запрос'), {
+      status: response.status,
+      data: error,
+    });
   }
   return response.json();
 }

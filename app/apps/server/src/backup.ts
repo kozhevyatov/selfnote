@@ -90,12 +90,15 @@ async function migrations(db: AnyDB): Promise<string[]> {
 }
 async function dataTables(db: AnyDB) {
   const tables = await db.introspection.getTables();
-  return tables
-    .filter((t) => !t.name.startsWith('kysely_migration'))
-    .map((t) => ({ name: t.name, columns: new Set(t.columns.map((c) => c.name)) }))
-    .sort((a, b) =>
-      a.name === 'users' ? -1 : b.name === 'users' ? 1 : a.name.localeCompare(b.name),
-    );
+  return (
+    tables
+      // notes_fts* — служебные таблицы полнотекстового индекса SQLite, их ведут триггеры
+      .filter((t) => !t.name.startsWith('kysely_migration') && !t.name.startsWith('notes_fts'))
+      .map((t) => ({ name: t.name, columns: new Set(t.columns.map((c) => c.name)) }))
+      .sort((a, b) =>
+        a.name === 'users' ? -1 : b.name === 'users' ? 1 : a.name.localeCompare(b.name),
+      )
+  );
 }
 function encodeRow(row: Record<string, unknown>) {
   const out: Record<string, unknown> = {};
