@@ -19,3 +19,11 @@ coverage/
 *.log
 .idea/
 .vscode/
+
+# Данные при запуске примеров прямо из samples/
+/samples/*/data/
+/samples/*/mariadb/
+/mariadb/
+
+# Макеты дизайна — только локально (референс для разработки)
+/design/

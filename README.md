@@ -45,21 +45,74 @@ SelfNote — замена облачным заметкам и Synology Note Sta
   <img src="docs/screenshots/note.png" alt="Открытая заметка с чек-листом и сроками задач" width="100%">
 </p>
 
-## Быстрый старт
+## Установка
 
-Нужен Docker с Compose.
+Нужен Docker с Compose (на Synology — Container Manager). Готовые файлы для трёх вариантов лежат в [`samples/`](samples/): выберите один, скачайте его `docker-compose.yml` и `env.example` в пустую папку сервиса.
+
+| Вариант | Когда выбрать | Файлы |
+|---|---|---|
+| **SQLite** | Один пользователь или семья, самый простой запуск | [`samples/sqlite`](samples/sqlite) |
+| **Существующая MariaDB** | На сервере уже работает MariaDB/MySQL в Docker | [`samples/mariadb-existing`](samples/mariadb-existing) |
+| **SelfNote + MariaDB** | Нужна отдельная MariaDB, а своей нет — поднимется вместе с сервисом | [`samples/mariadb-bundled`](samples/mariadb-bundled) |
+
+### 1. Скачать файлы
 
 ```bash
 mkdir selfnote && cd selfnote
-curl -O https://raw.githubusercontent.com/kozhevyatov/selfnote/main/docker-compose.yml
-curl -o .env https://raw.githubusercontent.com/kozhevyatov/selfnote/main/env.example
+VARIANT=sqlite          # или mariadb-existing, или mariadb-bundled
+curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/kozhevyatov/selfnote/main/samples/$VARIANT/docker-compose.yml
+curl -fsSL -o .env https://raw.githubusercontent.com/kozhevyatov/selfnote/main/samples/$VARIANT/env.example
 mkdir data
-docker compose up -d
 ```
 
-Откройте `http://адрес-сервера:1339` и пройдите мастер первого запуска.
+На Synology без SSH: создайте папку в `docker/selfnote`, положите туда `docker-compose.yml` и `.env` через File Station, затем Container Manager → «Проект» → «Создать» → укажите эту папку.
 
-> **Совет.** Откройте сервис через домен с HTTPS (например, через Nginx Proxy Manager с включённым *Websockets Support*). Без HTTPS заметки работают, но браузер не даёт установить приложение и запускать его офлайн.
+### 2. Подготовить вариант
+
+**SQLite** — ничего делать не нужно.
+
+**Существующая MariaDB.** В `.env` укажите `DB_NETWORK` — Docker-сеть, где работает база (`docker network ls`; на Synology часто `db`). Создайте базу и пользователя:
+
+```sql
+CREATE DATABASE selfnote CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'selfnote'@'%' IDENTIFIED BY 'длинный-пароль';
+GRANT ALL PRIVILEGES ON selfnote.* TO 'selfnote'@'%';
+FLUSH PRIVILEGES;
+```
+
+**SelfNote + MariaDB.** В `.env` придумайте `MARIADB_PASSWORD` и `MARIADB_ROOT_PASSWORD`. База и пользователь создадутся сами, файлы базы — в папке `mariadb/` рядом с compose.
+
+### 3. Запустить
+
+```bash
+docker compose up -d
+docker compose logs -f selfnote     # первая строка: «selfnote: запуск от …»
+```
+
+### 4. Пройти мастер первого запуска
+
+Откройте `http://адрес-сервера:1339`:
+
+| Вариант | Что выбрать в мастере |
+|---|---|
+| SQLite | «SQLite» |
+| Существующая MariaDB | «MariaDB», хост — имя контейнера базы в сети (например `db`), порт `3306`, база/пользователь/пароль — созданные выше |
+| SelfNote + MariaDB | «MariaDB», хост `mariadb`, порт `3306`, база и пользователь `selfnote`, пароль — `MARIADB_PASSWORD` из `.env` |
+
+Затем создайте администратора и выберите режим регистрации: открытая, закрытая или по приглашению.
+
+### 5. HTTPS
+
+Откройте сервис через домен с HTTPS — например, через Nginx Proxy Manager: прокси на `адрес-сервера:1339`, включить **Websockets Support** (нужен для синхронизации) и выпустить сертификат. В `.env` задайте:
+
+```env
+APP_ORIGIN=https://notes.example.ru
+COOKIE_SECURE=true
+```
+
+и примените: `docker compose up -d`. Без HTTPS заметки работают, но браузер не даёт установить приложение на телефон и запускать его без сети.
+
+> **Права на папку `data/` настраивать не нужно.** Контейнер сам отдаёт её пользователю сервиса. Чтобы файлы принадлежали вашему пользователю (на Synology — пользователю DSM), задайте в `.env` `PUID` и `PGID` (узнать: `id` по SSH).
 
 ### Обновление
 
@@ -80,12 +133,12 @@ docker compose up -d
 | `TRUST_PROXY` | `false` | `true`, только если сервис доступен исключительно через ваш reverse proxy |
 | `PUID` / `PGID` | `1000` | От какого пользователя хоста работать (на Synology — ваш пользователь DSM, `id` по SSH) |
 | `SELFNOTE_TAG` | `latest` | Версия образа: `latest`, номер релиза или `sha-…` |
-
-**MariaDB в другой Docker-сети** (например, сеть `db` на Synology): раскомментируйте блоки `networks` в `docker-compose.yml` и укажите хост базы в мастере.
+| `DB_NETWORK` | `db` | Только `mariadb-existing`: Docker-сеть существующей базы |
+| `MARIADB_*` | — | Только `mariadb-bundled`: имя базы, пользователь и пароли встроенной MariaDB |
 
 ### Резервные копии
 
-Всё состояние сервиса — папка `data/`: база SQLite (или настройки подключения к MariaDB), картинки, ключ токенов. Для копии SQLite остановите контейнер или используйте backup API; при MariaDB сохраняйте ещё и дамп базы. Автоматические бэкапы, экспорт и импорт (в том числе из Synology Note Station) — в ближайших планах.
+Всё состояние сервиса — папка `data/`: база SQLite (или настройки подключения к MariaDB), картинки, ключ токенов; в варианте с встроенной базой — ещё папка `mariadb/`. Для файловой копии остановите контейнеры (`docker compose stop`); при внешней MariaDB сохраняйте ещё и дамп базы. Автоматические бэкапы, экспорт и импорт (в том числе из Synology Note Station) — в ближайших планах.
 
 ## Планы
 

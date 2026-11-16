@@ -1,0 +1,47 @@
+# SelfNote + собственная MariaDB в одном проекте. База создаётся сама при первом запуске.
+# Перед запуском задайте пароли в .env (MARIADB_PASSWORD, MARIADB_ROOT_PASSWORD).
+# В мастере: MariaDB, хост mariadb, порт 3306, база/пользователь/пароль — из .env.
+services:
+  selfnote:
+    image: ghcr.io/kozhevyatov/selfnote:${SELFNOTE_TAG:-latest}
+    container_name: selfnote
+    restart: unless-stopped
+    ports:
+      - '${PORT:-1339}:1339'
+    environment:
+      NODE_ENV: production
+      PORT: 1339
+      DATA_DIR: /data
+      COOKIE_SECURE: '${COOKIE_SECURE:-false}'
+      TRUST_PROXY: '${TRUST_PROXY:-false}'
+      APP_ORIGIN: '${APP_ORIGIN:-}'
+      PUID: '${PUID:-}'
+      PGID: '${PGID:-}'
+    volumes:
+      - ./data:/data
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    stop_grace_period: 30s
+
+  mariadb:
+    image: mariadb:11
+    container_name: selfnote-mariadb
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: '${MARIADB_DATABASE:-selfnote}'
+      MARIADB_USER: '${MARIADB_USER:-selfnote}'
+      MARIADB_PASSWORD: '${MARIADB_PASSWORD:?задайте MARIADB_PASSWORD в .env}'
+      MARIADB_ROOT_PASSWORD: '${MARIADB_ROOT_PASSWORD:?задайте MARIADB_ROOT_PASSWORD в .env}'
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - ./mariadb:/var/lib/mysql
+    healthcheck:
+      test: ['CMD', 'healthcheck.sh', '--connect', '--innodb_initialized']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    # Порт базы наружу не публикуется: она доступна только сервису SelfNote.

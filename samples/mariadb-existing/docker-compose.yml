@@ -1,0 +1,30 @@
+# SelfNote + уже работающая MariaDB/MySQL в другой Docker-сети (например, сеть db на Synology).
+# Перед запуском: создать в MariaDB базу (utf8mb4) и пользователя с правами на неё —
+# команды в README. В мастере: MariaDB, хост = имя контейнера базы в этой сети, порт 3306.
+services:
+  selfnote:
+    image: ghcr.io/kozhevyatov/selfnote:${SELFNOTE_TAG:-latest}
+    container_name: selfnote
+    restart: unless-stopped
+    ports:
+      - '${PORT:-1339}:1339'
+    environment:
+      NODE_ENV: production
+      PORT: 1339
+      DATA_DIR: /data
+      COOKIE_SECURE: '${COOKIE_SECURE:-false}'
+      TRUST_PROXY: '${TRUST_PROXY:-false}'
+      APP_ORIGIN: '${APP_ORIGIN:-}'
+      PUID: '${PUID:-}'
+      PGID: '${PGID:-}'
+    volumes:
+      - ./data:/data
+    networks:
+      - db
+    stop_grace_period: 30s
+
+networks:
+  db:
+    external: true
+    # имя существующей сети: docker network ls
+    name: ${DB_NETWORK:-db}
