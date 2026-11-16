@@ -16,6 +16,10 @@ services:
       APP_ORIGIN: '${APP_ORIGIN:-}'
       PUID: '${PUID:-}'
       PGID: '${PGID:-}'
+      TZ: '${TZ:-UTC}'
+      BACKUP_ENABLED: '${BACKUP_ENABLED:-true}'
+      BACKUP_HOUR: '${BACKUP_HOUR:-4}'
+      BACKUP_DIR: '${BACKUP_DIR:-/data/backups}'
     volumes:
       - ./data:/data
     stop_grace_period: 30s

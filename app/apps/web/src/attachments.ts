@@ -43,16 +43,20 @@ export async function storeImage(file: File, userId: string) {
   await put({ key: `${userId}:${src}`, blob: file, pending: true });
   return src;
 }
-export async function imageUrl(src: string, userId: string) {
+/** Содержимое картинки заметки: из локального кэша или с сервера (с кэшированием). */
+export async function imageBlob(src: string, userId: string): Promise<Blob> {
   const key = `${userId}:${src}`,
     cached = await get(key);
-  if (cached) return URL.createObjectURL(cached.blob);
+  if (cached) return cached.blob;
   if (!src.startsWith('/api/attachments/')) throw new Error('Изображение ещё не синхронизировано');
   const response = await fetch(src, { headers: { Authorization: `Bearer ${await token()}` } });
   if (!response.ok) throw new Error('Изображение недоступно');
   const blob = await response.blob();
   await put({ key, blob, pending: false });
-  return URL.createObjectURL(blob);
+  return blob;
+}
+export async function imageUrl(src: string, userId: string) {
+  return URL.createObjectURL(await imageBlob(src, userId));
 }
 let busy = false;
 export async function flushImages(workspace: Workspace) {

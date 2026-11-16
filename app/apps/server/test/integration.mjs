@@ -344,6 +344,44 @@ try {
     '✓ Корзина: восстановление, 31 день, очистка таблиц, ручное удаление и защита от офлайн-воскрешения',
   );
 
+  // Резервная копия: создание, список, скачивание, восстановление после «порчи» данных.
+  const created = await request('/api/admin/backups', {}, owner.accessToken);
+  assert.equal(created.status, 200, await created.clone().text());
+  const backup = await created.json();
+  assert.match(backup.name, /^selfnote-backup-.+-manual\.zip$/);
+  const listing = await (await request('/api/admin/backups', undefined, owner.accessToken)).json();
+  assert.ok(listing.backups.some((b) => b.name === backup.name));
+  assert.equal(listing.status.lastFile, backup.name);
+  assert.equal((await request('/api/admin/backups', undefined, other.accessToken)).status, 403);
+  const download = await request(`/api/admin/backups/${backup.name}`, undefined, owner.accessToken);
+  assert.equal(download.status, 200);
+  const zipBytes = new Uint8Array(await download.arrayBuffer());
+  assert.equal(String.fromCharCode(zipBytes[0], zipBytes[1]), 'PK');
+  assert.equal(
+    (await request('/api/admin/backups/../../etc/passwd', undefined, owner.accessToken)).status,
+    404,
+  );
+  const damage = new SQLite(path.join(data, 'selfnote.sqlite'));
+  const before = {
+    docs: damage.prepare('select count(*) as n from yjs_documents').get().n,
+    users: damage.prepare('select count(*) as n from users').get().n,
+  };
+  damage.prepare('delete from tasks').run();
+  damage.prepare("delete from yjs_documents where name like 'note:%'").run();
+  damage.close();
+  const restored = await request('/api/admin/restore', { name: backup.name }, owner.accessToken);
+  assert.equal(restored.status, 200, await restored.clone().text());
+  const restoreResult = await restored.json();
+  assert.match(restoreResult.safety, /before-restore/);
+  const check = new SQLite(path.join(data, 'selfnote.sqlite'));
+  assert.equal(check.prepare('select count(*) as n from yjs_documents').get().n, before.docs);
+  assert.equal(check.prepare('select count(*) as n from users').get().n, before.users);
+  check.close();
+  assert.equal((await request('/api/tasks', undefined, owner.accessToken)).status, 200);
+  console.log(
+    '✓ Резервная копия: создание, скачивание, восстановление и копия перед восстановлением',
+  );
+
   const csrf = await fetch(base + '/api/auth/logout', {
     method: 'POST',
     headers: { Origin: 'https://foreign.example', Cookie: cookie },

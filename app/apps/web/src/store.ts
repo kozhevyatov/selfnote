@@ -200,6 +200,44 @@ export class Workspace {
       fields.set('updatedAt', new Date().toISOString());
     });
   }
+  /**
+   * Создать заметку программно (импорт): не выбирает её в интерфейсе и не трогает фильтр.
+   * fill заполняет содержимое до появления заметки в списке.
+   */
+  addNote(
+    meta: Partial<Note> & { title: string; source?: string },
+    fill?: (content: Y.XmlFragment) => void,
+  ) {
+    const id = uuid();
+    const entry = this.note(id);
+    if (fill) entry.doc.transact(() => fill(entry.doc.getXmlFragment('content')));
+    const fields = new Y.Map<unknown>();
+    for (const [key, value] of Object.entries({
+      id,
+      title: meta.title,
+      notebookId: meta.notebookId ?? null,
+      sectionId: meta.sectionId ?? null,
+      tags: meta.tags ?? [],
+      pinned: meta.pinned ?? false,
+      updatedAt: meta.updatedAt ?? new Date().toISOString(),
+      deletedAt: null,
+      encrypted: false,
+      color: meta.color ?? null,
+    } satisfies Note))
+      fields.set(key, value);
+    if (meta.source) fields.set('source', meta.source);
+    this.noteMap.set(id, fields);
+    return id;
+  }
+  /** Источники уже импортированных заметок — чтобы повторный импорт не создавал дубли. */
+  importedSources(): Set<string> {
+    const result = new Set<string>();
+    for (const value of this.noteMap.values()) {
+      const source = value instanceof Y.Map ? value.get('source') : undefined;
+      if (typeof source === 'string') result.add(source);
+    }
+    return result;
+  }
   createNote(taskList = false) {
     const id = uuid();
     const filter = useUI.getState().filter;

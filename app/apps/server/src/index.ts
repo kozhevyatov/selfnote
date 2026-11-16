@@ -23,6 +23,19 @@ import {
   versionsToKeep,
 } from '@selfnote/shared';
 import { db, dataDir, loadDatabase, openDatabase, activateDatabase, type DB } from './db.js';
+import {
+  backupDir,
+  backupHour,
+  backupsEnabled,
+  createBackup,
+  inspectBackup,
+  isBackupName,
+  listBackups,
+  readStatus,
+  restoreBackup,
+  scheduleBackups,
+} from './backup.js';
+import { createReadStream } from 'node:fs';
 z.config(z.locales.ru());
 await mkdir(dataDir, { recursive: true });
 const keyPath = path.join(dataDir, 'jwt.key');
@@ -103,7 +116,7 @@ app.setErrorHandler((error, request, reply) => {
   });
 });
 async function issueSession(
-  user: { id: string; name: string; email: string },
+  user: { id: string; name: string; email: string; role?: string },
   reply: import('fastify').FastifyReply,
 ) {
   const token = randomBytes(32).toString('base64url');
@@ -122,10 +135,24 @@ async function issueSession(
   reply.setCookie('refresh', token, cookieOptions);
   return {
     accessToken: app.jwt.sign({ sub: user.id, sid }, { expiresIn: '15m' }),
-    user: { id: user.id, name: user.name, email: user.email },
+    user: { id: user.id, name: user.name, email: user.email, role: user.role ?? 'user' },
   };
 }
 let settingUp = false;
+/** Режим обслуживания на время восстановления из копии: новые подключения не принимаются. */
+let maintenance = false;
+const MAX_BACKUP_BYTES = Number(process.env.MAX_RESTORE_MB ?? 2048) * 1024 * 1024;
+const databaseConfig = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('sqlite') }),
+  z.object({
+    type: z.literal('mariadb'),
+    host: z.string().min(1),
+    port: z.number().int().min(1).max(65535),
+    database: z.string().min(1),
+    user: z.string().min(1),
+    password: z.string(),
+  }),
+]);
 app.get('/api/health', async () => ({ ok: true }));
 app.get('/api/setup', async () => ({
   required: !db || !(await db.selectFrom('users').select('id').executeTakeFirst()),
@@ -148,17 +175,7 @@ app.post(
     const input = registration
       .extend({
         registration: z.enum(['open', 'closed', 'invite']),
-        database: z.discriminatedUnion('type', [
-          z.object({ type: z.literal('sqlite') }),
-          z.object({
-            type: z.literal('mariadb'),
-            host: z.string().min(1),
-            port: z.number().int().min(1).max(65535),
-            database: z.string().min(1),
-            user: z.string().min(1),
-            password: z.string(),
-          }),
-        ]),
+        database: databaseConfig,
       })
       .parse(request.body);
     settingUp = true;
@@ -167,7 +184,7 @@ app.post(
       conn = await openDatabase(input.database);
       if (await conn.selectFrom('users').select('id').executeTakeFirst())
         return reply.code(409).send({ message: 'Выбранная база уже настроена' });
-      const user = { id: randomUUID(), name: input.name, email: input.email };
+      const user = { id: randomUUID(), name: input.name, email: input.email, role: 'admin' };
       const password_hash = await argon2.hash(input.password, { type: argon2.argon2id });
       await conn.transaction().execute(async (trx) => {
         await trx
@@ -207,7 +224,7 @@ app.post(
         .executeTakeFirst()
     )
       return reply.code(409).send({ message: 'Этот адрес уже используется' });
-    const user = { id: randomUUID(), email: input.email, name: input.name };
+    const user = { id: randomUUID(), email: input.email, name: input.name, role: 'user' };
     await database()
       .insertInto('users')
       .values({
@@ -263,7 +280,7 @@ app.post('/api/auth/refresh', async (request, reply) => {
   if (!session) return reply.code(401).send({ message: 'Сессия завершена' });
   const user = await database()
     .selectFrom('users')
-    .select(['id', 'name', 'email'])
+    .select(['id', 'name', 'email', 'role'])
     .where('id', '=', session.user_id)
     .executeTakeFirstOrThrow();
   return {
@@ -512,6 +529,7 @@ const collab = new Hocuspocus({
   debounce: 500,
   maxDebounce: 2000,
   async onAuthenticate({ token, documentName }) {
+    if (maintenance) throw new Error('Идёт восстановление из резервной копии');
     const claims = app.jwt.verify<{ sub: string; sid: string }>(token);
     const session = await database()
       .selectFrom('sessions')
@@ -525,6 +543,7 @@ const collab = new Hocuspocus({
     return { owner: claims.sub, sid: claims.sid };
   },
   async beforeHandleMessage({ context, documentName }) {
+    if (maintenance) throw new Error('Идёт восстановление из резервной копии');
     await restoring;
     await authorizeDocument(documentName, (context as { owner: string }).owner);
     const { owner, sid } = context as { owner: string; sid: string };
@@ -894,6 +913,161 @@ async function runCleanup() {
 }
 const cleanupTimer = setInterval(() => void runCleanup(), 86400000);
 cleanupTimer.unref();
+
+// ===== Резервные копии =====
+async function requireAdmin(request: import('fastify').FastifyRequest) {
+  const id = await userId(request);
+  const row = await database()
+    .selectFrom('users')
+    .select('role')
+    .where('id', '=', id)
+    .executeTakeFirst();
+  if (row?.role !== 'admin')
+    throw Object.assign(new Error('Доступно только администратору'), { statusCode: 403 });
+  return id;
+}
+async function databaseType() {
+  try {
+    const config = JSON.parse(await readFile(path.join(dataDir, 'database.json'), 'utf8'));
+    return String(config.type);
+  } catch {
+    return 'unknown';
+  }
+}
+let backingUp: Promise<Awaited<ReturnType<typeof createBackup>>> | null = null;
+function runBackup(kind: 'auto' | 'manual' | 'before-restore') {
+  if (!backingUp)
+    backingUp = (async () => createBackup(database(), kind, await databaseType()))().finally(() => {
+      backingUp = null;
+    });
+  return backingUp;
+}
+/** Отключить всех и дождаться, пока сервер выгрузит документы из памяти. */
+async function quiesceDocuments() {
+  collab.closeConnections();
+  const deadline = Date.now() + 30000;
+  while (collab.getDocumentsCount() > 0 && Date.now() < deadline)
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  await serializeDocuments(async () => undefined);
+}
+const backupTimer = scheduleBackups(async () => {
+  if (!db || maintenance) return;
+  try {
+    const result = await runBackup('auto');
+    app.log.info({ backup: result.name }, 'Резервная копия создана');
+  } catch (error) {
+    app.log.error(error, 'Не удалось создать резервную копию');
+  }
+});
+app.get('/api/admin/backups', async (request) => {
+  await requireAdmin(request);
+  return {
+    backups: await listBackups(),
+    status: await readStatus(),
+    schedule: {
+      enabled: backupsEnabled(),
+      hour: backupHour(),
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    },
+    directory: backupDir(),
+  };
+});
+app.post('/api/admin/backups', async (request) => {
+  await requireAdmin(request);
+  return runBackup('manual');
+});
+app.get('/api/admin/backups/:name', async (request, reply) => {
+  await requireAdmin(request);
+  const name = (request.params as { name: string }).name;
+  const file = path.join(backupDir(), name);
+  if (!isBackupName(name)) return reply.code(404).send({ message: 'Копия не найдена' });
+  try {
+    await access(file);
+  } catch {
+    return reply.code(404).send({ message: 'Копия не найдена' });
+  }
+  reply.header('Content-Type', 'application/zip');
+  reply.header('Content-Disposition', `attachment; filename="${name}"`);
+  reply.header('Cache-Control', 'no-store');
+  return reply.send(createReadStream(file));
+});
+app.delete('/api/admin/backups/:name', async (request, reply) => {
+  await requireAdmin(request);
+  const name = (request.params as { name: string }).name;
+  if (!isBackupName(name)) return reply.code(404).send({ message: 'Копия не найдена' });
+  await rm(path.join(backupDir(), name), { force: true });
+  return { ok: true };
+});
+/** Восстановление на работающем сервере: из загруженного файла или из списка копий. */
+app.post('/api/admin/restore', async (request, reply) => {
+  await requireAdmin(request);
+  let bytes: Uint8Array;
+  if (request.isMultipart()) {
+    const file = await request.file({ limits: { fileSize: MAX_BACKUP_BYTES, files: 1 } });
+    if (!file) return reply.code(400).send({ message: 'Выберите файл резервной копии' });
+    bytes = await file.toBuffer();
+    if (file.file.truncated) return reply.code(413).send({ message: 'Файл слишком большой' });
+  } else {
+    const { name } = z.object({ name: z.string() }).parse(request.body);
+    if (!isBackupName(name)) return reply.code(404).send({ message: 'Копия не найдена' });
+    bytes = await readFile(path.join(backupDir(), name));
+  }
+  await inspectBackup(bytes);
+  if (maintenance) return reply.code(409).send({ message: 'Восстановление уже выполняется' });
+  maintenance = true;
+  try {
+    const safety = await runBackup('before-restore');
+    await quiesceDocuments();
+    const result = await serializeDocuments(() => restoreBackup(database(), bytes));
+    app.log.warn({ result, safety: safety.name }, 'Данные восстановлены из резервной копии');
+    return { ...result, safety: safety.name };
+  } finally {
+    maintenance = false;
+  }
+});
+/** Восстановление на чистом сервере — вместо мастера первого запуска. */
+app.post(
+  '/api/setup/restore',
+  { config: { rateLimit: { max: 5, timeWindow: '1 minute' } } },
+  async (request, reply) => {
+    if (settingUp || (db && (await db.selectFrom('users').select('id').executeTakeFirst())))
+      return reply.code(409).send({ message: 'Сервис уже настроен или настройка выполняется' });
+    if (!request.isMultipart())
+      return reply.code(400).send({ message: 'Загрузите файл резервной копии' });
+    let config: z.infer<typeof databaseConfig> | undefined;
+    let bytes: Uint8Array | undefined;
+    for await (const part of request.parts({ limits: { fileSize: MAX_BACKUP_BYTES, files: 1 } })) {
+      if (part.type === 'file') {
+        bytes = await part.toBuffer();
+        if (part.file.truncated) return reply.code(413).send({ message: 'Файл слишком большой' });
+      } else if (part.fieldname === 'database')
+        config = databaseConfig.parse(JSON.parse(String(part.value)));
+    }
+    if (!bytes || !config)
+      return reply.code(400).send({ message: 'Нужны файл копии и параметры базы данных' });
+    await inspectBackup(bytes);
+    settingUp = true;
+    let conn: DB | undefined;
+    try {
+      conn = await openDatabase(config);
+      if (await conn.selectFrom('users').select('id').executeTakeFirst())
+        return reply.code(409).send({ message: 'Выбранная база уже содержит данные' });
+      const result = await restoreBackup(conn, bytes);
+      const admin = await conn
+        .selectFrom('users')
+        .select('id')
+        .where('role', '=', 'admin')
+        .executeTakeFirst();
+      if (!admin) throw Object.assign(new Error('В копии нет администратора'), { statusCode: 400 });
+      await activateDatabase(conn, config);
+      conn = undefined;
+      return { ok: true, ...result };
+    } finally {
+      settingUp = false;
+      if (conn) await conn.destroy();
+    }
+  },
+);
 await runCleanup();
 const webRoot = fileURLToPath(new URL('../../web/dist/', import.meta.url));
 try {
@@ -909,6 +1083,7 @@ try {
 }
 const shutdown = async () => {
   clearInterval(cleanupTimer);
+  clearInterval(backupTimer);
   await new Promise<void>((resolve) => {
     collab.configuration.extensions.push({
       async afterUnloadDocument({ instance }) {

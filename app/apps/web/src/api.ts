@@ -2,6 +2,8 @@ export interface User {
   id: string;
   name: string;
   email: string;
+  /** admin — может управлять резервными копиями. */
+  role?: string;
 }
 let accessToken = '';
 let refreshing: Promise<{ accessToken: string; user: User }> | undefined;

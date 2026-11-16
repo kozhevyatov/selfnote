@@ -38,6 +38,7 @@ import {
 } from '@selfnote/shared';
 import { api, refresh, setToken, type User } from './api';
 import { Auth } from './Auth';
+import { DataSettings } from './DataSettings';
 import { Workspace, useUI } from './store';
 import { NoteEditor, Due } from './Editor';
 import { flushImages } from './attachments';
@@ -1044,6 +1045,7 @@ function WorkspaceShell({
                 }}
               />
             </div>
+            <DataSettings workspace={workspace} user={user} toast={ui.toast} />
             <h3>Сессии</h3>
             {sessions.map((session) => (
               <div key={session.id} className="session">

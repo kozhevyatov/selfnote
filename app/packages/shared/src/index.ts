@@ -20,6 +20,8 @@ export interface Note {
   deletedAt: string | null;
   encrypted: boolean;
   color: string | null;
+  /** Откуда импортирована (например, nsx:1026_…) — защита от повторного импорта. */
+  source?: string;
 }
 export interface Task {
   id: string;
@@ -171,4 +173,31 @@ export function restoreContent(target: Y.Doc, snapshot: Uint8Array) {
   } finally {
     source.destroy();
   }
+}
+export * from './zip.js';
+/**
+ * Какие резервные копии оставить: последние 7 дней (по одной в день),
+ * 4 недели (по одной в неделю) и 6 месяцев (по одной в месяц). Схема «дед-отец-сын».
+ */
+export function backupsToKeep(backups: { name: string; created_at: string }[]): Set<string> {
+  const sorted = [...backups].sort((a, b) => b.created_at.localeCompare(a.created_at));
+  const keep = new Set<string>();
+  const pick = (key: (d: Date) => string, limit: number) => {
+    const seen = new Set<string>();
+    for (const b of sorted) {
+      const k = key(new Date(b.created_at));
+      if (seen.has(k)) continue;
+      if (seen.size >= limit) break;
+      seen.add(k);
+      keep.add(b.name);
+    }
+  };
+  pick((d) => d.toISOString().slice(0, 10), 7);
+  pick((d) => {
+    const monday = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+    monday.setUTCDate(monday.getUTCDate() - ((monday.getUTCDay() + 6) % 7));
+    return monday.toISOString().slice(0, 10);
+  }, 4);
+  pick((d) => d.toISOString().slice(0, 7), 6);
+  return keep;
 }

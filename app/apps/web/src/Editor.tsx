@@ -456,3 +456,14 @@ export function VersionPreview({ doc, userId }: { doc: Y.Doc; userId: string }) 
   );
   return <EditorContent editor={editor} />;
 }
+
+/** Схема документа заметки без интерактивных частей — для импорта и экспорта. */
+export function contentExtensions(userId: string) {
+  return [
+    StarterKit.configure({ heading: { levels: [2, 3] }, link: { openOnClick: false } }),
+    Spoiler,
+    TaskList,
+    Tasks,
+    LocalImage.configure({ userId }),
+  ];
+}
