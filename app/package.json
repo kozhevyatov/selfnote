@@ -13,9 +13,9 @@
   "scripts": {
     "dev": "npm run build -w @selfnote/shared && concurrently -k \"npm run dev -w @selfnote/server\" \"npm run dev -w @selfnote/web\"",
     "build": "npm run build -w @selfnote/shared && npm run build -w @selfnote/server && npm run build -w @selfnote/web",
-    "typecheck": "tsc --noEmit -p packages/shared && tsc --noEmit -p apps/server && tsc --noEmit -p apps/web",
-    "test": "vitest run",
-    "lint": "eslint apps packages",
+    "typecheck": "npm run build -w @selfnote/shared && tsc --noEmit -p apps/server && tsc --noEmit -p apps/web",
+    "test": "npm run build -w @selfnote/shared && vitest run",
+    "lint": "npm run build -w @selfnote/shared && eslint apps packages",
     "format": "prettier --write apps packages *.json *.md",
     "start": "node --env-file-if-exists=../.env apps/server/dist/index.js",
     "test:integration": "npm run build -w @selfnote/shared && npm run build -w @selfnote/server && node apps/server/test/integration.mjs"

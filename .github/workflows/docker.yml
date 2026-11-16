@@ -24,15 +24,17 @@ jobs:
       run:
         working-directory: app
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: app/package-lock.json
 
       - run: npm ci --no-audit --no-fund
+      # общий пакет импортируется из dist/, которого нет в Git — собираем первым
+      - run: npm run build -w @selfnote/shared
       - run: npm run typecheck
       - run: npm run lint
       - run: npm test
@@ -49,7 +51,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: docker/setup-buildx-action@v3
 
