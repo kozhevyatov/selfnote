@@ -1,0 +1,35 @@
+{
+  "name": "selfnote",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "dev": "npm run build -w @selfnote/shared && concurrently -k \"npm run dev -w @selfnote/server\" \"npm run dev -w @selfnote/web\"",
+    "build": "npm run build -w @selfnote/shared && npm run build -w @selfnote/server && npm run build -w @selfnote/web",
+    "typecheck": "tsc --noEmit -p packages/shared && tsc --noEmit -p apps/server && tsc --noEmit -p apps/web",
+    "test": "vitest run",
+    "lint": "eslint apps packages",
+    "format": "prettier --write apps packages *.json *.md",
+    "start": "node --env-file-if-exists=../.env apps/server/dist/index.js",
+    "test:integration": "npm run build -w @selfnote/shared && npm run build -w @selfnote/server && node apps/server/test/integration.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.0",
+    "eslint": "^9.39.0",
+    "typescript-eslint": "^8.46.0",
+    "globals": "^16.4.0",
+    "prettier": "^3.6.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.4",
+    "concurrently": "^9.2.0",
+    "@types/node": "^22.18.0",
+    "tsx": "^4.20.0"
+  }
+}

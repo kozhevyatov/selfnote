@@ -1,0 +1,30 @@
+# SelfNote — запуск из готового образа (собирается GitHub Actions).
+# Обновление: docker compose pull && docker compose up -d
+# Собрать образ локально из исходников: docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+services:
+  selfnote:
+    image: ghcr.io/kozhevyatov/selfnote:${SELFNOTE_TAG:-latest}
+    container_name: selfnote
+    restart: unless-stopped
+    ports:
+      - '${PORT:-1339}:1339'
+    environment:
+      NODE_ENV: production
+      PORT: 1339
+      DATA_DIR: /data
+      COOKIE_SECURE: '${COOKIE_SECURE:-false}'
+      TRUST_PROXY: '${TRUST_PROXY:-false}'
+      APP_ORIGIN: '${APP_ORIGIN:-}'
+      PUID: '${PUID:-}'
+      PGID: '${PGID:-}'
+    volumes:
+      - ./data:/data
+    stop_grace_period: 30s
+    # Существующая MariaDB в другой Docker-сети (на Synology — сеть db):
+    # раскомментируйте оба блока networks и укажите в мастере хост db.
+    # networks:
+    #   - db
+
+# networks:
+#   db:
+#     external: true

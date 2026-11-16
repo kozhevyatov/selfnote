@@ -1,0 +1,37 @@
+{
+  "name": "@selfnote/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build"
+  },
+  "dependencies": {
+    "@selfnote/shared": "*",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "@tiptap/react": "^3.7.0",
+    "@tiptap/pm": "^3.7.0",
+    "@tiptap/starter-kit": "^3.7.0",
+    "@tiptap/extension-collaboration": "^3.7.0",
+    "@tiptap/extension-task-list": "^3.7.0",
+    "@tiptap/extension-task-item": "^3.7.0",
+    "@tiptap/extension-image": "^3.7.0",
+    "@hocuspocus/provider": "^3.4.0",
+    "yjs": "^13.6.27",
+    "y-indexeddb": "^9.0.12",
+    "zustand": "^5.0.8",
+    "minisearch": "^7.2.0",
+    "lucide-react": "^0.468.0",
+    "@fontsource/golos-text": "^5.2.0",
+    "@tiptap/y-tiptap": "^3.3.0"
+  },
+  "devDependencies": {
+    "vite": "^7.3.8",
+    "@vitejs/plugin-react": "^4.4.0",
+    "vite-plugin-pwa": "^1.1.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0"
+  }
+}
