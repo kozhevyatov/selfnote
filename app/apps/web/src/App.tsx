@@ -712,7 +712,9 @@ function WorkspaceShell({
                 #{tag}
               </button>
             ))}
-            {!workspace.tags.size && <button onClick={addTag}>+ Добавить метку</button>}
+            {!workspace.tags.size && (
+              <button className="add-tag" onClick={addTag}>+ Добавить метку</button>
+            )}
           </div>
         </div>
         <div className="sidebar-bottom">

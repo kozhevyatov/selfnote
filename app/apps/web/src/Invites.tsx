@@ -64,7 +64,7 @@ export function InvitesCard({
       </p>
       {!closed && (
         <form
-          className="user-reset"
+          className="invite-create"
           onSubmit={(e) => {
             e.preventDefault();
             void run(async () => {
