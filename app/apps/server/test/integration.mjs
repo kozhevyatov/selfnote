@@ -46,9 +46,26 @@ async function request(url, body, token, cookie, method = body ? 'POST' : 'GET')
     body: body ? JSON.stringify(body) : undefined,
   });
 }
+// Отложенный reconnect библиотеки может сработать уже после destroy().
+// Завершённый тестовый клиент больше не должен открывать соединения.
+class TestWebsocket extends HocuspocusProviderWebsocket {
+  disposed = false;
+
+  async connect() {
+    if (this.disposed) return;
+    return super.connect();
+  }
+
+  destroy() {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.cancelWebsocketRetry?.();
+    super.destroy();
+  }
+}
 function connect(name, token, doc = new Y.Doc()) {
   docs.push(doc);
-  const socket = new HocuspocusProviderWebsocket({
+  const socket = new TestWebsocket({
     url: `ws://127.0.0.1:${port}/collab`,
     WebSocketPolyfill: WebSocket,
   });

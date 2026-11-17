@@ -473,7 +473,7 @@ function EditorBody({ workspace, id, doc }: { workspace: Workspace; id: string; 
     onTransaction: () => setTick((t) => t + 1),
   });
   useEffect(() => {
-    editor?.setEditable(editable);
+    editor?.setEditable(editable, false);
   }, [editor, editable]);
   async function addFiles(files: File[]) {
     if (!workspace.canEdit(id)) return;

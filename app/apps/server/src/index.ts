@@ -1487,13 +1487,12 @@ app.get('/api/collaboration', async (request): Promise<CollaborationList> => {
   }
   const ownedRows = await database()
     .selectFrom('note_members')
-    .select('note_id')
+    .innerJoin('notes_index', 'notes_index.note_id', 'note_members.note_id')
+    .select('note_members.note_id')
+    .where('notes_index.owner_id', '=', user)
     .distinct()
     .execute();
-  const owned: string[] = [];
-  for (const row of ownedRows)
-    if ((await ownedNoteKind(row.note_id, user)) === 'plain') owned.push(row.note_id);
-  return { notes, owned };
+  return { notes, owned: ownedRows.map((row) => row.note_id) };
 });
 app.get('/api/notes/:id/members', async (request) => {
   const user = await userId(request);

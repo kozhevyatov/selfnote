@@ -30,7 +30,8 @@ export async function token() {
 }
 export async function api<T>(url: string, options: RequestInit = {}, retry = true): Promise<T> {
   const headers = new Headers(options.headers);
-  if (!(options.body instanceof FormData)) headers.set('Content-Type', 'application/json');
+  if (options.body != null && !(options.body instanceof FormData))
+    headers.set('Content-Type', 'application/json');
   if (accessToken) headers.set('Authorization', `Bearer ${accessToken}`);
   const response = await fetch(url, { ...options, headers, credentials: 'same-origin' });
   if (
