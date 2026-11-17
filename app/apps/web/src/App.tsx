@@ -1752,7 +1752,11 @@ function Preview({
     return (
       <>{parts.map((part, i) => (part.mark ? <mark key={i}>{part.text}</mark> : part.text))}</>
     );
-  return <>{text.replace(/\n/g, ' ') || 'Пока здесь чистый лист'}</>;
+  return (
+    <>
+      {text.replace(/\n/g, ' ') || (workspace.isLoaded(note.id) ? 'Пока здесь чистый лист' : '…')}
+    </>
+  );
 }
 function EditDialog({ dialog, close }: { dialog: Dialog; close: () => void }) {
   const [value, setValue] = useState(dialog.value);

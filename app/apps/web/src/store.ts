@@ -60,6 +60,7 @@ type StoredNote = Y.Map<unknown> | Note;
 function toNote(value: StoredNote): Note {
   return value instanceof Y.Map ? (value.toJSON() as Note) : value;
 }
+const EMPTY_EXTRACT: Extracted = { plainText: '', tasks: [] };
 export class Workspace {
   /** Одно WebSocket-соединение на все документы (Hocuspocus мультиплексирует их). */
   private readonly socket: HocuspocusProviderWebsocket;
@@ -79,6 +80,10 @@ export class Workspace {
   private collaborationTimer: ReturnType<typeof setInterval>;
   private loadingCollaboration = false;
   private collaborationAgain = false;
+  /** Документ заметки уже открыт на устройстве (не ждёт в очереди загрузки). */
+  isLoaded(id: string) {
+    return this.notes.has(id);
+  }
   isOwner(id: string) {
     return this.noteMap.has(id);
   }
@@ -282,9 +287,13 @@ export class Workspace {
         this.dropPlain(id);
         if (useUI.getState().selected === id) useUI.getState().select(null);
       } else if (this.metadata.get(id)?.encrypted) this.dropPlain(id);
-    for (const [id, note] of this.metadata) {
-      if (!note.encrypted) this.note(id);
-    }
+    // Документы открываем очередью (свежие первыми), а не все разом: при сотнях заметок
+    // одновременная загрузка из IndexedDB и синхронизация подвешивали вкладку.
+    this.loadQueue = [...this.metadata.values()]
+      .filter((note) => !note.encrypted && !this.notes.has(note.id))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .map((note) => note.id);
+    this.pumpQueue();
     const secureIds = new Set(
       [...this.metadata.values()].filter((n) => n.encrypted).map((n) => n.id),
     );
@@ -294,6 +303,21 @@ export class Workspace {
     void this.secure.prune(secureIds).catch(() => undefined);
   }
   private secureIds = new Set<string>();
+  private loadQueue: string[] = [];
+  private loadingNotes = 0;
+  private pumpQueue() {
+    while (this.loadingNotes < 8 && this.loadQueue.length && !this.stopped) {
+      const id = this.loadQueue.shift()!;
+      const meta = this.metadata.get(id);
+      if (this.notes.has(id) || !meta || meta.encrypted) continue;
+      this.loadingNotes++;
+      const done = () => {
+        this.loadingNotes--;
+        setTimeout(() => this.pumpQueue(), 0);
+      };
+      this.note(id).ready.then(done, done);
+    }
+  }
   /** Убрать открытую копию заметки с устройства (удалена или закрыта паролем). */
   dropPlain(id: string) {
     const entry = this.notes.get(id);
@@ -356,7 +380,9 @@ export class Workspace {
   }
   /** Текст и задачи заметки; пересчитываются только после изменения этой заметки. */
   extract(id: string): Extracted {
-    if (this.metadata.get(id)?.kind === 'passwords') return { plainText: '', tasks: [] };
+    if (this.metadata.get(id)?.kind === 'passwords') return EMPTY_EXTRACT;
+    // Документ ещё в очереди загрузки — не открываем его ради превью в списке.
+    if (!this.notes.has(id) && !this.metadata.get(id)?.encrypted) return EMPTY_EXTRACT;
     let value = this.extracted.get(id);
     if (!value) {
       const doc = this.noteDoc(id);
@@ -579,9 +605,22 @@ export class Workspace {
     };
   };
   snapshot = () => this.revision;
+  /**
+   * Перерисовка не чаще раза в кадр: при старте сотни документов присылают обновления,
+   * и синхронный emit на каждое блокировал интерфейс.
+   */
+  private emitScheduled = false;
   emit = () => {
-    this.revision++;
-    for (const callback of this.callbacks) callback();
+    if (this.emitScheduled) return;
+    this.emitScheduled = true;
+    const run = () => {
+      this.emitScheduled = false;
+      this.revision++;
+      for (const callback of this.callbacks) callback();
+    };
+    if (typeof requestAnimationFrame === 'function' && document.visibilityState === 'visible')
+      requestAnimationFrame(run);
+    else setTimeout(run, 16);
   };
   markVersion(id: string) {
     if (!this.canEdit(id) || !this.metadata.has(id) || this.metadata.get(id)?.encrypted) return;
