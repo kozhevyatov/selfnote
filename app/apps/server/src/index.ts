@@ -37,6 +37,7 @@ import {
   loadDatabase,
   openDatabase,
   activateDatabase,
+  attachmentIds,
   type DB,
 } from './db.js';
 import { shareAssets, sharePage, unavailablePage, SHARE_CSP } from './share-page.js';
@@ -618,6 +619,7 @@ async function storeDocument(name: string, document: Y.Doc, owner: string, autho
           await trx.deleteFrom('encrypted_notes').where('note_id', '=', id).execute();
           await trx.deleteFrom('shares').where('note_id', '=', id).execute();
           await trx.deleteFrom('note_members').where('note_id', '=', id).execute();
+          await trx.deleteFrom('note_attachments').where('note_id', '=', id).execute();
         }
         const deleted = [...deletedNoteIds(document)];
         let restore = trx
@@ -687,6 +689,7 @@ async function storeDocument(name: string, document: Y.Doc, owner: string, autho
               })),
             )
             .execute();
+        await indexAttachments(trx, noteId, owner, attachmentIds(document));
         const last = await trx
           .selectFrom('note_versions')
           .select('created_at')
@@ -704,6 +707,30 @@ async function storeDocument(name: string, document: Y.Doc, owner: string, autho
     });
 }
 type Executor = Pick<DB, 'selectFrom' | 'deleteFrom'>;
+/** Только добавляем: картинка из прошлой версии остаётся доступной участникам через историю. */
+async function indexAttachments(
+  trx: Pick<DB, 'selectFrom' | 'insertInto'>,
+  noteId: string,
+  owner: string,
+  ids: string[],
+) {
+  if (!ids.length) return;
+  const known = new Set(
+    (
+      await trx
+        .selectFrom('note_attachments')
+        .select('attachment_id')
+        .where('note_id', '=', noteId)
+        .execute()
+    ).map((row) => row.attachment_id),
+  );
+  const fresh = ids.filter((id) => !known.has(id));
+  if (fresh.length)
+    await trx
+      .insertInto('note_attachments')
+      .values(fresh.map((id) => ({ note_id: noteId, attachment_id: id, owner_id: owner })))
+      .execute();
+}
 /** Заметка в корзине по данным документа пространства (для первой записи в notes_index). */
 async function isDeleted(trx: Executor, owner: string, noteId: string): Promise<number> {
   const row = await trx
@@ -753,9 +780,15 @@ const collab = new Hocuspocus({
   async beforeHandleMessage({ context, documentName, connection }) {
     if (maintenance) throw new Error('Идёт восстановление из резервной копии');
     await restoring;
-    const role = await authorizeDocument(documentName, (context as { owner: string }).owner);
-    connection.readOnly = role === 'reader';
     const { owner, sid } = context as { owner: string; sid: string };
+    // Права перепроверяем не чаще раза в 5 секунд: смена роли, отзыв, корзина, пароль
+    // и удаление и так закрывают соединение (resetNoteConnections / closeConnections).
+    const checked = ((context as { checked?: Record<string, number> }).checked ??= {});
+    if (!checked[documentName] || Date.now() - checked[documentName] > 5000) {
+      const role = await authorizeDocument(documentName, owner);
+      connection.readOnly = role === 'reader';
+      checked[documentName] = Date.now();
+    }
     const session = await database()
       .selectFrom('sessions')
       .select('id')
@@ -805,6 +838,7 @@ const collab = new Hocuspocus({
         ...deletedNoteIds(document),
         ...document.getMap('purged').keys(),
       ])) {
+        if (!collab.documents.has(`note:${id}`)) continue;
         const row = await database()
           .selectFrom('yjs_documents')
           .select('owner_id')
@@ -974,11 +1008,14 @@ app.post('/api/notes/:id/versions', { bodyLimit: 24 * 1024 * 1024 }, async (requ
     if (!row) return reply.code(409).send({ message: 'Дождитесь синхронизации заметки' });
     const bytes = Buffer.from(state, 'base64');
     const doc = new Y.Doc();
+    let images: string[];
     try {
       Y.applyUpdate(doc, bytes);
+      images = attachmentIds(doc);
     } finally {
       doc.destroy();
     }
+    await indexAttachments(database(), id, row.owner_id, images);
     await database()
       .insertInto('note_versions')
       .values({
@@ -1073,55 +1110,55 @@ app.get('/api/attachments/:id', async (request, reply) => {
     .where('owner_id', '=', owner)
     .executeTakeFirst();
   if (!row) {
+    // Картинка из совместной заметки: индекс note_attachments + проверка доступа к заметке.
+    const links = await database()
+      .selectFrom('note_attachments')
+      .innerJoin('note_members', 'note_members.note_id', 'note_attachments.note_id')
+      .select(['note_attachments.note_id', 'note_attachments.owner_id'])
+      .where('note_attachments.attachment_id', '=', id)
+      .where('note_members.user_id', '=', owner)
+      .where('note_members.accepted_at', 'is not', null)
+      .execute();
+    for (const link of links) {
+      try {
+        await ownedNote(link.note_id, owner);
+      } catch {
+        continue;
+      }
+      row = await database()
+        .selectFrom('attachments')
+        .select('id')
+        .where('id', '=', id)
+        .where('owner_id', '=', link.owner_id)
+        .executeTakeFirst();
+      if (row) {
+        owner = link.owner_id;
+        break;
+      }
+    }
+  }
+  if (!row) {
+    // Индекс пополняется при сохранении (debounce до 2 с) — свежую картинку ищем в открытых документах.
     const memberships = await database()
       .selectFrom('note_members')
       .select('note_id')
       .where('user_id', '=', owner)
       .where('accepted_at', 'is not', null)
       .execute();
-    for (const member of memberships) {
+    for (const { note_id } of memberships) {
+      const live = collab.documents.get(`note:${note_id}`) as Y.Doc | undefined;
+      if (!live || !attachmentIds(live).includes(id)) continue;
       try {
-        await ownedNote(member.note_id, owner);
+        await ownedNote(note_id, owner);
       } catch {
         continue;
       }
       const source = await database()
         .selectFrom('yjs_documents')
         .select('owner_id')
-        .where('name', '=', `note:${member.note_id}`)
+        .where('name', '=', `note:${note_id}`)
         .executeTakeFirst();
       if (!source) continue;
-      const content = await noteDocument(member.note_id);
-      let referenced = false;
-      if (content) {
-        try {
-          referenced = renderDocument(content.doc.getXmlFragment('content')).images.includes(
-            `/api/attachments/${id}`,
-          );
-        } finally {
-          content.release();
-        }
-      }
-      if (!referenced) {
-        const versions = await database()
-          .selectFrom('note_versions')
-          .select('state')
-          .where('note_id', '=', member.note_id)
-          .execute();
-        for (const version of versions) {
-          const doc = new Y.Doc();
-          try {
-            Y.applyUpdate(doc, version.state);
-            referenced = renderDocument(doc.getXmlFragment('content')).images.includes(
-              `/api/attachments/${id}`,
-            );
-          } finally {
-            doc.destroy();
-          }
-          if (referenced) break;
-        }
-      }
-      if (!referenced) continue;
       row = await database()
         .selectFrom('attachments')
         .select('id')
@@ -1386,6 +1423,7 @@ app.put('/api/encrypted/:id', { bodyLimit: 32 * 1024 * 1024 }, async (request, r
           await trx.deleteFrom('note_versions').where('note_id', '=', id).execute();
           await trx.deleteFrom('shares').where('note_id', '=', id).execute();
           await trx.deleteFrom('note_members').where('note_id', '=', id).execute();
+          await trx.deleteFrom('note_attachments').where('note_id', '=', id).execute();
         });
       collab.closeConnections(`note:${id}`);
       return { version: 1, updated_at: now };

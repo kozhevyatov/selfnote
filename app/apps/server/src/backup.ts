@@ -7,7 +7,7 @@ import { mkdir, readdir, readFile, rm, stat, writeFile, rename } from 'node:fs/p
 import path from 'node:path';
 import type { Kysely } from 'kysely';
 import { readZip, readZipText, writeZip, backupsToKeep, type ZipInput } from '@selfnote/shared';
-import { dataDir, type DB } from './db.js';
+import { dataDir, rebuildNoteAttachments, type DB } from './db.js';
 
 type AnyDB = Kysely<Record<string, Record<string, unknown>>>;
 const FORMAT = 'selfnote-backup';
@@ -272,6 +272,8 @@ export async function restoreBackup(database: DB, bytes: Uint8Array): Promise<Re
     await writeFile(target, await entry.read());
     attachments++;
   }
+  // В старых копиях индекса вложений нет, а в новых он мог устареть — пересобираем.
+  await rebuildNoteAttachments(db as unknown as DB);
   return { tables: restored, attachments, createdAt: manifest.createdAt };
 }
 

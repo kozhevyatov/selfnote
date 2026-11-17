@@ -4,7 +4,7 @@ import { createPool } from 'mysql2';
 import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import path from 'node:path';
 import * as Y from 'yjs';
-import { extractDocument, deletedNoteIds, uniqueTasks } from '@selfnote/shared';
+import { extractDocument, deletedNoteIds, uniqueTasks, renderDocument } from '@selfnote/shared';
 import { fileURLToPath } from 'node:url';
 export const dataDir = path.resolve(
   process.env.DATA_DIR || fileURLToPath(new URL('../../../../data/', import.meta.url)),
@@ -20,6 +20,11 @@ export type Config =
       password: string;
     };
 interface Database {
+  note_attachments: {
+    note_id: string;
+    attachment_id: string;
+    owner_id: string;
+  };
   note_members: {
     note_id: string;
     user_id: string;
@@ -121,6 +126,23 @@ export async function openDatabase(config: Config): Promise<DB> {
     db: conn,
     provider: {
       getMigrations: async () => ({
+        '007_note_attachments': {
+          up: async (d: Kysely<unknown>) => {
+            await d.schema
+              .createTable('note_attachments')
+              .addColumn('note_id', 'varchar(36)', (c) => c.notNull())
+              .addColumn('attachment_id', 'varchar(64)', (c) => c.notNull())
+              .addColumn('owner_id', 'varchar(36)', (c) => c.notNull())
+              .addPrimaryKeyConstraint('note_attachments_pk', ['note_id', 'attachment_id'])
+              .execute();
+            await d.schema
+              .createIndex('note_attachments_attachment')
+              .on('note_attachments')
+              .column('attachment_id')
+              .execute();
+            await rebuildNoteAttachments(d as unknown as DB);
+          },
+        },
         '006_note_members': {
           up: async (d: Kysely<unknown>) => {
             await d.schema
@@ -408,4 +430,59 @@ export async function activateDatabase(conn: DB, config: Config) {
   await rename(path.join(dataDir, 'database.json.tmp'), path.join(dataDir, 'database.json'));
   db = conn;
   dbType = config.type;
+}
+
+/** id вложений (sha256), на которые ссылается содержимое документа заметки. */
+export function attachmentIds(doc: Y.Doc): string[] {
+  const ids = new Set<string>();
+  for (const src of renderDocument(doc.getXmlFragment('content')).images) {
+    const match = /^\/api\/attachments\/([a-f0-9]{64})(?:[?#]|$)/.exec(src);
+    if (match) ids.add(match[1]);
+  }
+  return [...ids];
+}
+/**
+ * Пересобрать индекс «заметка → вложения» по текущим документам и истории.
+ * Нужен участникам совместных заметок, чтобы проверка доступа к картинке была одним запросом.
+ */
+export async function rebuildNoteAttachments(d: DB) {
+  await d.deleteFrom('note_attachments').execute();
+  const notes = await d
+    .selectFrom('yjs_documents')
+    .select(['name', 'owner_id'])
+    .where('name', 'like', 'note:%')
+    .execute();
+  for (const note of notes) {
+    const noteId = note.name.slice(5);
+    const found = new Set<string>();
+    const current = await d
+      .selectFrom('yjs_documents')
+      .select('state')
+      .where('name', '=', note.name)
+      .executeTakeFirst();
+    const versions = await d
+      .selectFrom('note_versions')
+      .select('state')
+      .where('note_id', '=', noteId)
+      .execute();
+    for (const state of [current?.state, ...versions.map((v) => v.state)]) {
+      if (!state) continue;
+      const doc = new Y.Doc();
+      try {
+        Y.applyUpdate(doc, state);
+        for (const id of attachmentIds(doc)) found.add(id);
+      } catch {
+        /* повреждённый снапшот не должен ломать миграцию */
+      } finally {
+        doc.destroy();
+      }
+    }
+    if (found.size)
+      await d
+        .insertInto('note_attachments')
+        .values(
+          [...found].map((id) => ({ note_id: noteId, attachment_id: id, owner_id: note.owner_id })),
+        )
+        .execute();
+  }
 }
