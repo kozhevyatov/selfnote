@@ -610,21 +610,6 @@ function WorkspaceShell({
                 className={`book-row ${active === book.id ? 'selected' : ''} ${drop(book.id)}`}
                 {...dropProps(book.id, (id) => moveNote(id, book.id, null))}
               >
-                {sections.some((s) => s.notebookId === book.id) ? (
-                  <button
-                    className="collapse-button"
-                    aria-label={collapsed.has(book.id) ? 'Развернуть книжку' : 'Свернуть книжку'}
-                    onClick={() => toggleCollapse(book.id)}
-                  >
-                    {collapsed.has(book.id) ? (
-                      <ChevronRight size={14} />
-                    ) : (
-                      <ChevronDown size={14} />
-                    )}
-                  </button>
-                ) : (
-                  <span className="collapse-button" aria-hidden="true" />
-                )}
                 <button className="book-name" onClick={() => ui.setFilter(book.id)}>
                   <span
                     className="book-icon"
@@ -637,6 +622,19 @@ function WorkspaceShell({
                     {notes.filter((n) => !n.deletedAt && n.notebookId === book.id).length}
                   </small>
                 </button>
+                {sections.some((s) => s.notebookId === book.id) && (
+                  <button
+                    className="collapse-button"
+                    aria-label={collapsed.has(book.id) ? 'Развернуть книжку' : 'Свернуть книжку'}
+                    onClick={() => toggleCollapse(book.id)}
+                  >
+                    {collapsed.has(book.id) ? (
+                      <ChevronRight size={14} />
+                    ) : (
+                      <ChevronDown size={14} />
+                    )}
+                  </button>
+                )}
                 <details className="row-menu">
                   <summary aria-label={`Действия с книжкой ${book.name}`}>
                     <MoreHorizontal size={15} />
@@ -923,13 +921,19 @@ function WorkspaceShell({
                   </>
                 )}
               </div>
-              <span className="modified">
-                Изменено в{' '}
+              <time className="modified" dateTime={new Date(selected.updatedAt).toISOString()}>
+                Изменено{' '}
+                {new Date(selected.updatedAt).toLocaleDateString('ru', {
+                  day: '2-digit',
+                  month: '2-digit',
+                  year: 'numeric',
+                })}{' '}
+                в{' '}
                 {new Date(selected.updatedAt).toLocaleTimeString('ru', {
                   hour: '2-digit',
                   minute: '2-digit',
                 })}
-              </span>
+              </time>
               <div className="editor-actions">
                 {!selected.encrypted && (
                   <button
