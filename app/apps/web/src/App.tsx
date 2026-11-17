@@ -18,7 +18,6 @@ import {
   X,
   Pin,
   ArchiveRestore,
-  LogOut,
   Clock3,
   MoreHorizontal,
   Tag,
@@ -43,12 +42,12 @@ import {
   type Section,
   type SnippetPart,
 } from '@selfnote/shared';
-import { ACCENTS, applyAppearance, storedAppearance, type Theme } from './theme';
+import { applyAppearance, storedAppearance, type Theme } from './theme';
 import { PasswordDialog, type PasswordMode } from './NoteSecurity';
 import { ShareDialog } from './Share';
 import { api, refresh, setToken, type User } from './api';
 import { Auth } from './Auth';
-import { DataSettings } from './DataSettings';
+import { SettingsNav, SettingsPane, initials } from './Settings';
 import { Workspace, useUI } from './store';
 import { NoteEditor, Due } from './Editor';
 import { flushImages } from './attachments';
@@ -125,6 +124,10 @@ export default function App() {
     <Shell
       key={user.id}
       user={user}
+      onUserChange={(value) => {
+        localStorage.setItem('selfnote-user', JSON.stringify(value));
+        setUser(value);
+      }}
       onLogout={() => {
         setUser(null);
         localStorage.removeItem('selfnote-user');
@@ -133,7 +136,15 @@ export default function App() {
     />
   );
 }
-function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
+function Shell({
+  user,
+  onLogout,
+  onUserChange,
+}: {
+  user: User;
+  onLogout: () => void;
+  onUserChange: (user: User) => void;
+}) {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   useEffect(() => {
     const next = new Workspace(user.id);
@@ -141,7 +152,12 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
     return () => next.destroy();
   }, [user.id]);
   return workspace ? (
-    <WorkspaceShell user={user} onLogout={onLogout} workspace={workspace} />
+    <WorkspaceShell
+      user={user}
+      onLogout={onLogout}
+      onUserChange={onUserChange}
+      workspace={workspace}
+    />
   ) : (
     <div className="loading">Открываем локальную базу…</div>
   );
@@ -149,10 +165,12 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
 function WorkspaceShell({
   user,
   onLogout,
+  onUserChange,
   workspace,
 }: {
   user: User;
   onLogout: () => void;
+  onUserChange: (user: User) => void;
   workspace: Workspace;
 }) {
   const revision = useSyncExternalStore(workspace.subscribe, workspace.snapshot);
@@ -161,11 +179,7 @@ function WorkspaceShell({
   const [collapsed, setCollapsed] = useState<Set<string>>(
     () => new Set(JSON.parse(localStorage.getItem(`collapsed:${user.id}`) || '[]')),
   );
-  const [settings, setSettings] = useState(false);
   const [more, setMore] = useState(false);
-  const [sessions, setSessions] = useState<
-    { id: string; created_at: string; expires_at: string }[]
-  >([]);
   const searchRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     const online = () => workspace.emit();
@@ -198,7 +212,6 @@ function WorkspaceShell({
       }
       if (e.key === 'Escape') {
         setDialog(null);
-        setSettings(false);
         setMore(false);
         closeMenus();
       }
@@ -487,14 +500,6 @@ function WorkspaceShell({
     setCollapsed(next);
     localStorage.setItem(`collapsed:${user.id}`, JSON.stringify([...next]));
   }
-  async function openSettings() {
-    setSettings(true);
-    try {
-      setSessions(await api('/api/auth/sessions'));
-    } catch {
-      ui.toast('Список сессий доступен при подключении к серверу');
-    }
-  }
   function moveNote(id: string, notebookId: string | null, sectionId: string | null) {
     workspace.update(id, { notebookId, sectionId });
     const where = sectionId
@@ -526,6 +531,8 @@ function WorkspaceShell({
     },
   });
   const drop = (target: string) => (dropTarget === target ? 'drop-target' : '');
+  // на странице настроек ни один раздел заметок не подсвечивается
+  const active = ui.settings ? null : ui.filter;
   const nav = (
     filter: string,
     label: string,
@@ -534,7 +541,7 @@ function WorkspaceShell({
     onDropNote?: (id: string) => void,
   ) => (
     <button
-      className={`nav-item ${ui.filter === filter ? 'selected' : ''} ${drop(filter)}`}
+      className={`nav-item ${active === filter ? 'selected' : ''} ${drop(filter)}`}
       {...(onDropNote ? dropProps(filter, onDropNote) : {})}
       onClick={() => {
         ui.setFilter(filter);
@@ -600,7 +607,7 @@ function WorkspaceShell({
           {notebooks.map((book) => (
             <div key={book.id} className="notebook">
               <div
-                className={`book-row ${ui.filter === book.id ? 'selected' : ''} ${drop(book.id)}`}
+                className={`book-row ${active === book.id ? 'selected' : ''} ${drop(book.id)}`}
                 {...dropProps(book.id, (id) => moveNote(id, book.id, null))}
               >
                 {sections.some((s) => s.notebookId === book.id) ? (
@@ -654,7 +661,7 @@ function WorkspaceShell({
                         {...dropProps(section.id, (id) => moveNote(id, book.id, section.id))}
                       >
                         <button
-                          className={ui.filter === section.id ? 'selected' : ''}
+                          className={active === section.id ? 'selected' : ''}
                           onClick={() => ui.setFilter(section.id)}
                         >
                           {section.name}
@@ -693,7 +700,7 @@ function WorkspaceShell({
             {[...workspace.tags.keys()].map((tag) => (
               <button
                 key={tag}
-                className={ui.filter === `tag:${tag}` ? 'active' : ''}
+                className={active === `tag:${tag}` ? 'active' : ''}
                 onClick={() => ui.setFilter(`tag:${tag}`)}
               >
                 #{tag}
@@ -704,19 +711,15 @@ function WorkspaceShell({
         </div>
         <div className="sidebar-bottom">
           {nav('trash', 'Корзина', Trash2, undefined, toTrash)}
-          <button className="nav-item" onClick={() => void openSettings()}>
+          <button
+            className={`nav-item ${ui.settings ? 'selected' : ''}`}
+            onClick={() => ui.openSettings(ui.settings ?? 'profile', 'list')}
+          >
             <Settings2 size={18} />
             Настройки
           </button>
-          <button className="profile" onClick={() => void openSettings()}>
-            <span className="avatar">
-              {user.name
-                .split(' ')
-                .slice(0, 2)
-                .map((n) => n[0])
-                .join('')
-                .toUpperCase()}
-            </span>
+          <button className="profile" onClick={() => ui.openSettings('profile')}>
+            <span className="avatar">{initials(user.name)}</span>
             <span>
               <strong>{user.name}</strong>
               <small>
@@ -728,169 +731,182 @@ function WorkspaceShell({
           </button>
         </div>
       </aside>
-      <section className="note-list panel">
-        <header className="list-header">
-          <div className="list-heading">
-            <button
-              className="icon-button mobile-only"
-              aria-label="Открыть меню"
-              onClick={() => useUI.setState({ mobile: 'nav' })}
-            >
-              <Menu size={20} />
-            </button>
-            <div>
-              {currentSection && (
-                <small>{workspace.notebooks.get(currentSection.notebookId)?.name}</small>
-              )}
-              <h1>{title}</h1>
-            </div>
-            <button
-              className="icon-button soft"
-              aria-label="Новая заметка"
-              onClick={() => workspace.createNote()}
-            >
-              <NotebookPen size={19} />
-            </button>
-          </div>
-          <label className="search">
-            <Search size={17} />
-            <input
-              ref={searchRef}
-              placeholder="Поиск"
-              aria-label="Поиск заметок"
-              value={ui.query}
-              onChange={(e) => useUI.setState({ query: e.target.value })}
-            />
-            {ui.query ? (
+      {ui.settings ? (
+        <SettingsNav user={user} />
+      ) : (
+        <section className="note-list panel">
+          <header className="list-header">
+            <div className="list-heading">
               <button
-                className="icon-button"
-                aria-label="Очистить поиск"
-                onClick={() => useUI.setState({ query: '' })}
+                className="icon-button mobile-only"
+                aria-label="Открыть меню"
+                onClick={() => useUI.setState({ mobile: 'nav' })}
               >
-                <X size={15} />
+                <Menu size={20} />
               </button>
-            ) : (
-              <kbd>⌘K</kbd>
-            )}
-          </label>
-        </header>
-        {ui.filter === 'trash' && (
-          <button
-            className="danger-text"
-            disabled={!notes.some((n) => n.deletedAt)}
-            onClick={() => {
-              if (window.confirm('Очистить корзину? Все заметки в ней будут удалены навсегда.'))
-                workspace.deleteForever(notes.filter((n) => n.deletedAt).map((n) => n.id));
-            }}
-          >
-            Очистить корзину
-          </button>
-        )}
-        <div className="notes-scroll">
-          {groupList.map(([group, items]) => (
-            <section key={group} className="date-group">
-              <h2>
-                {group}
-                {captions.has(group) && <small>{captions.get(group)}</small>}
-              </h2>
-              {items.map((note) => (
+              <div>
+                {currentSection && (
+                  <small>{workspace.notebooks.get(currentSection.notebookId)?.name}</small>
+                )}
+                <h1>{title}</h1>
+              </div>
+              <button
+                className="icon-button soft"
+                aria-label="Новая заметка"
+                onClick={() => workspace.createNote()}
+              >
+                <NotebookPen size={19} />
+              </button>
+            </div>
+            <label className="search">
+              <Search size={17} />
+              <input
+                ref={searchRef}
+                placeholder="Поиск"
+                aria-label="Поиск заметок"
+                value={ui.query}
+                onChange={(e) => useUI.setState({ query: e.target.value })}
+              />
+              {ui.query ? (
                 <button
-                  key={note.id}
-                  className={`note-row ${ui.selected === note.id ? 'selected' : ''}`}
-                  onClick={() => ui.select(note.id)}
-                  draggable
-                  onDragStart={(e) => {
-                    e.dataTransfer.setData(NOTE_TYPE, note.id);
-                    e.dataTransfer.effectAllowed = 'move';
-                  }}
-                  onDragEnd={() => setDropTarget(null)}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    const rect = e.currentTarget.getBoundingClientRect();
-                    // с клавиатуры (Shift+F10, клавиша меню) координат нет — берём строку
-                    const keyboard = e.clientX === 0 && e.clientY === 0;
-                    setMenu({
-                      id: note.id,
-                      x: keyboard ? rect.left + 24 : e.clientX,
-                      y: keyboard ? rect.top + 24 : e.clientY,
-                    });
-                  }}
-                  aria-haspopup="menu"
+                  className="icon-button"
+                  aria-label="Очистить поиск"
+                  onClick={() => useUI.setState({ query: '' })}
                 >
-                  <span className="note-row-top">
-                    <strong>
-                      {note.encrypted && <Lock size={13} aria-label="Под паролем" />}
-                      {workspace.title(note)}
-                    </strong>
-                    <time>
-                      {new Date(note.updatedAt).toLocaleTimeString('ru', {
-                        hour: '2-digit',
-                        minute: '2-digit',
-                      })}
-                    </time>
-                  </span>
-                  <span className="note-preview">
-                    <Preview
-                      workspace={workspace}
-                      note={note}
-                      query={ui.query}
-                      remote={remoteParts.get(note.id)}
-                    />
-                  </span>
+                  <X size={15} />
                 </button>
-              ))}
-            </section>
-          ))}
-          {!filtered.length && ui.filter === 'shared' && !ui.query && (
-            <div className="empty">
-              <Users size={30} />
-              <h3>Пока нет общих заметок</h3>
-              <p>Откройте заметку и нажмите «Поделиться», чтобы создать публичную ссылку.</p>
-            </div>
-          )}
-          {!filtered.length && ui.filter === 'favorites' && !ui.query && (
-            <div className="empty">
-              <Star size={30} />
-              <h3>В избранном пусто</h3>
-              <p>Отметьте заметку звёздочкой или перетащите её сюда.</p>
-            </div>
-          )}
-          {!filtered.length && (ui.query || !['shared', 'favorites'].includes(ui.filter)) && (
-            <div className="empty">
-              <FileText size={30} />
-              <h3>
-                {ui.query
-                  ? 'Ничего не найдено'
-                  : ui.filter === 'trash'
-                    ? 'Корзина пуста'
-                    : ui.filter === 'tasks'
-                      ? 'Заметок с задачами пока нет'
-                      : 'Здесь будут ваши заметки'}
-              </h3>
-              <p>
-                {ui.query ? 'Попробуйте другие слова.' : 'Начните с мысли, плана или списка дел.'}
-              </p>
-              {ui.filter !== 'trash' && (
-                <button onClick={() => workspace.createNote()}>
-                  <Plus size={16} />
-                  Новая заметка
-                </button>
+              ) : (
+                <kbd>⌘K</kbd>
               )}
-            </div>
+            </label>
+          </header>
+          {ui.filter === 'trash' && (
+            <button
+              className="danger-text"
+              disabled={!notes.some((n) => n.deletedAt)}
+              onClick={() => {
+                if (window.confirm('Очистить корзину? Все заметки в ней будут удалены навсегда.'))
+                  workspace.deleteForever(notes.filter((n) => n.deletedAt).map((n) => n.id));
+              }}
+            >
+              Очистить корзину
+            </button>
           )}
-        </div>
-        <footer className="list-footer">
-          {filtered.length}{' '}
-          {new Intl.PluralRules('ru').select(filtered.length) === 'one'
-            ? 'заметка'
-            : new Intl.PluralRules('ru').select(filtered.length) === 'few'
-              ? 'заметки'
-              : 'заметок'}
-          <span>Сохраняются автоматически</span>
-        </footer>
-      </section>
+          <div className="notes-scroll">
+            {groupList.map(([group, items]) => (
+              <section key={group} className="date-group">
+                <h2>
+                  {group}
+                  {captions.has(group) && <small>{captions.get(group)}</small>}
+                </h2>
+                {items.map((note) => (
+                  <button
+                    key={note.id}
+                    className={`note-row ${ui.selected === note.id ? 'selected' : ''}`}
+                    onClick={() => ui.select(note.id)}
+                    draggable
+                    onDragStart={(e) => {
+                      e.dataTransfer.setData(NOTE_TYPE, note.id);
+                      e.dataTransfer.effectAllowed = 'move';
+                    }}
+                    onDragEnd={() => setDropTarget(null)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      // с клавиатуры (Shift+F10, клавиша меню) координат нет — берём строку
+                      const keyboard = e.clientX === 0 && e.clientY === 0;
+                      setMenu({
+                        id: note.id,
+                        x: keyboard ? rect.left + 24 : e.clientX,
+                        y: keyboard ? rect.top + 24 : e.clientY,
+                      });
+                    }}
+                    aria-haspopup="menu"
+                  >
+                    <span className="note-row-top">
+                      <strong>
+                        {note.encrypted && <Lock size={13} aria-label="Под паролем" />}
+                        {workspace.title(note)}
+                      </strong>
+                      <time>
+                        {new Date(note.updatedAt).toLocaleTimeString('ru', {
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}
+                      </time>
+                    </span>
+                    <span className="note-preview">
+                      <Preview
+                        workspace={workspace}
+                        note={note}
+                        query={ui.query}
+                        remote={remoteParts.get(note.id)}
+                      />
+                    </span>
+                  </button>
+                ))}
+              </section>
+            ))}
+            {!filtered.length && ui.filter === 'shared' && !ui.query && (
+              <div className="empty">
+                <Users size={30} />
+                <h3>Пока нет общих заметок</h3>
+                <p>Откройте заметку и нажмите «Поделиться», чтобы создать публичную ссылку.</p>
+              </div>
+            )}
+            {!filtered.length && ui.filter === 'favorites' && !ui.query && (
+              <div className="empty">
+                <Star size={30} />
+                <h3>В избранном пусто</h3>
+                <p>Отметьте заметку звёздочкой или перетащите её сюда.</p>
+              </div>
+            )}
+            {!filtered.length && (ui.query || !['shared', 'favorites'].includes(ui.filter)) && (
+              <div className="empty">
+                <FileText size={30} />
+                <h3>
+                  {ui.query
+                    ? 'Ничего не найдено'
+                    : ui.filter === 'trash'
+                      ? 'Корзина пуста'
+                      : ui.filter === 'tasks'
+                        ? 'Заметок с задачами пока нет'
+                        : 'Здесь будут ваши заметки'}
+                </h3>
+                <p>
+                  {ui.query ? 'Попробуйте другие слова.' : 'Начните с мысли, плана или списка дел.'}
+                </p>
+                {ui.filter !== 'trash' && (
+                  <button onClick={() => workspace.createNote()}>
+                    <Plus size={16} />
+                    Новая заметка
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+          <footer className="list-footer">
+            {filtered.length}{' '}
+            {new Intl.PluralRules('ru').select(filtered.length) === 'one'
+              ? 'заметка'
+              : new Intl.PluralRules('ru').select(filtered.length) === 'few'
+                ? 'заметки'
+                : 'заметок'}
+            <span>Сохраняются автоматически</span>
+          </footer>
+        </section>
+      )}
       <main className="editor-panel panel">
-        {selected ? (
+        {ui.settings ? (
+          <SettingsPane
+            user={user}
+            workspace={workspace}
+            appearance={appearance}
+            setAppearance={setAppearance}
+            onUserChange={onUserChange}
+            onLogout={onLogout}
+          />
+        ) : selected ? (
           <>
             <header className="editor-header">
               <div className="breadcrumb">
@@ -1332,110 +1348,6 @@ function WorkspaceShell({
           onMove={moveNote}
           onTrash={toTrash}
         />
-      )}
-      {settings && (
-        <div className="modal-backdrop" onClick={() => setSettings(false)}>
-          <section
-            className="modal settings-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="settings-title"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="modal-heading">
-              <h2 id="settings-title">Настройки</h2>
-              <button
-                className="icon-button"
-                aria-label="Закрыть настройки"
-                onClick={() => setSettings(false)}
-              >
-                <X size={20} />
-              </button>
-            </div>
-            <h3>{user.name}</h3>
-            <p className="muted">{user.email}</p>
-            <h3>Оформление</h3>
-            <div className="segmented" role="radiogroup" aria-label="Тема">
-              {(
-                [
-                  ['system', 'Как в системе'],
-                  ['light', 'Светлая'],
-                  ['dark', 'Тёмная'],
-                ] as [Theme, string][]
-              ).map(([value, label]) => (
-                <button
-                  key={value}
-                  type="button"
-                  role="radio"
-                  aria-checked={appearance.theme === value}
-                  className={appearance.theme === value ? 'selected' : ''}
-                  onClick={() => setAppearance(value, appearance.accent)}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-            <div className="settings-color">
-              <span>Цвет акцента</span>
-              <div className="color-options">
-                {ACCENTS.map((c) => (
-                  <button
-                    key={c}
-                    type="button"
-                    aria-label={`Акцент ${c}`}
-                    aria-pressed={appearance.accent.toLowerCase() === c.toLowerCase()}
-                    style={{ background: c }}
-                    onClick={() => setAppearance(appearance.theme, c)}
-                  >
-                    {appearance.accent.toLowerCase() === c.toLowerCase() && <Check size={18} />}
-                  </button>
-                ))}
-                <ColorPicker
-                  value={appearance.accent}
-                  label="Свой цвет акцента"
-                  onChange={(color) => setAppearance(appearance.theme, color)}
-                />
-              </div>
-            </div>
-            <DataSettings workspace={workspace} user={user} toast={ui.toast} />
-            <h3>Сессии</h3>
-            {sessions.map((session) => (
-              <div key={session.id} className="session">
-                <span>Вход {new Date(session.created_at).toLocaleString('ru')}</span>
-                <button
-                  onClick={async () => {
-                    try {
-                      await api(`/api/auth/sessions/${session.id}`, { method: 'DELETE' });
-                      setSessions(sessions.filter((s) => s.id !== session.id));
-                    } catch (e) {
-                      ui.toast((e as Error).message);
-                    }
-                  }}
-                >
-                  Завершить
-                </button>
-              </div>
-            ))}
-            <p className="small muted">
-              При выходе локальные данные остаются в этом браузере для офлайн-доступа. На общем
-              компьютере очистите данные сайта после выхода.
-            </p>
-            <button
-              className="danger-text"
-              onClick={async () => {
-                try {
-                  await api('/api/auth/logout', { method: 'POST' });
-                  onLogout();
-                } catch {
-                  ui.toast('Для завершения сессии нужно подключение к серверу');
-                }
-              }}
-            >
-              <LogOut size={17} />
-              Выйти из аккаунта
-            </button>
-          </section>
-        </div>
       )}
     </div>
   );

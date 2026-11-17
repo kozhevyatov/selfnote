@@ -13,14 +13,19 @@ import { api, refresh, token } from './api';
 import { uuid } from './ids';
 import { SecureNotes, secureTitle } from './secure';
 import type { Theme } from './theme';
+/** Разделы страницы настроек. */
+export type SettingsSection = 'profile' | 'appearance' | 'data' | 'backups' | 'users';
 export const useUI = create<{
   selected: string | null;
   filter: string;
   query: string;
   mobile: 'nav' | 'list' | 'editor';
   message: string;
+  /** Открытый раздел настроек; null — обычный режим со списком заметок. */
+  settings: SettingsSection | null;
   select: (id: string | null) => void;
   setFilter: (filter: string) => void;
+  openSettings: (section: SettingsSection, mobile?: 'list' | 'editor') => void;
   toast: (message: string) => void;
 }>((set) => ({
   selected: null,
@@ -28,8 +33,16 @@ export const useUI = create<{
   query: '',
   mobile: 'list',
   message: '',
-  select: (selected) => set({ selected, mobile: selected ? 'editor' : 'list' }),
-  setFilter: (filter) => set({ filter, selected: null, mobile: 'list', query: '' }),
+  settings: null,
+  // открытие заметки уводит со страницы настроек
+  select: (selected) =>
+    set((s) => ({
+      selected,
+      mobile: selected ? 'editor' : 'list',
+      settings: selected ? null : s.settings,
+    })),
+  setFilter: (filter) => set({ filter, selected: null, mobile: 'list', query: '', settings: null }),
+  openSettings: (settings, mobile = 'editor') => set({ settings, selected: null, mobile }),
   toast: (message) => set({ message }),
 }));
 export type Entry = {

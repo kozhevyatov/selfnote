@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Download, Upload, DatabaseBackup, RotateCcw, Trash2, FileArchive } from 'lucide-react';
-import { api, token, type User } from './api';
+import { api, token } from './api';
 import type { Workspace } from './store';
 import { exportMarkdown, exportSelfnote, download } from './transfer/exporters';
 import {
@@ -21,14 +21,12 @@ const when = (iso?: string) => (iso ? new Date(iso).toLocaleString('ru') : '—'
 const plural = (n: number, one: string, few: string, many: string) =>
   `${n} ${n % 10 === 1 && n % 100 !== 11 ? one : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? few : many}`;
 
-/** Экспорт и импорт заметок, а для администратора — резервные копии сервера. */
+/** Экспорт и импорт заметок. */
 export function DataSettings({
   workspace,
-  user,
   toast,
 }: {
   workspace: Workspace;
-  user: User;
   toast: (message: string) => void;
 }) {
   const [scope, setScope] = useState('all');
@@ -207,7 +205,6 @@ export function DataSettings({
           {progress && <progress value={progress[0]} max={progress[1]} />}
         </div>
       )}
-      {user.role === 'admin' && <Backups toast={toast} />}
     </div>
   );
 }
@@ -236,7 +233,7 @@ const KIND_LABEL: Record<BackupInfo['kind'], string> = {
   other: '',
 };
 
-function Backups({ toast }: { toast: (message: string) => void }) {
+export function Backups({ toast }: { toast: (message: string) => void }) {
   const [state, setState] = useState<BackupState | null>(null);
   const [busy, setBusy] = useState('');
   const restoreInput = useRef<HTMLInputElement>(null);
@@ -270,9 +267,6 @@ function Backups({ toast }: { toast: (message: string) => void }) {
     'Устройства, которые работали офлайн, после подключения вернут свои локальные правки.\n\nПродолжить?';
   return (
     <>
-      <h3>
-        <DatabaseBackup size={17} /> Резервные копии сервера
-      </h3>
       {!state ? (
         <p className="small muted">Загрузка…</p>
       ) : (

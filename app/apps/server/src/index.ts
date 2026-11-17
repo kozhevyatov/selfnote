@@ -321,11 +321,14 @@ app.post('/api/auth/logout', async (request, reply) => {
 });
 app.get('/api/auth/sessions', async (request) => {
   const id = await userId(request);
-  return database()
+  const { sid } = request.user as { sid: string };
+  const rows = await database()
     .selectFrom('sessions')
     .select(['id', 'created_at', 'expires_at'])
     .where('user_id', '=', id)
+    .orderBy('created_at', 'desc')
     .execute();
+  return rows.map((row) => ({ ...row, current: row.id === sid }));
 });
 app.delete('/api/auth/sessions/:id', async (request) => {
   const id = await userId(request);
@@ -334,6 +337,155 @@ app.delete('/api/auth/sessions/:id', async (request) => {
     .where('id', '=', (request.params as { id: string }).id)
     .where('user_id', '=', id)
     .execute();
+  return { ok: true };
+});
+// ===== Профиль =====
+app.patch('/api/me', async (request) => {
+  const id = await userId(request);
+  const input = z.object({ name: z.string().trim().min(1).max(120) }).parse(request.body);
+  await database().updateTable('users').set({ name: input.name }).where('id', '=', id).execute();
+  return database()
+    .selectFrom('users')
+    .select(['id', 'name', 'email', 'role'])
+    .where('id', '=', id)
+    .executeTakeFirstOrThrow();
+});
+app.post(
+  '/api/me/password',
+  { config: { rateLimit: { max: 5, timeWindow: '1 minute' } } },
+  async (request, reply) => {
+    const id = await userId(request);
+    const { sid } = request.user as { sid: string };
+    const input = z
+      .object({ current: z.string().min(1).max(256), next: z.string().min(10).max(256) })
+      .parse(request.body);
+    const row = await database()
+      .selectFrom('users')
+      .select('password_hash')
+      .where('id', '=', id)
+      .executeTakeFirstOrThrow();
+    if (!(await argon2.verify(row.password_hash, input.current)))
+      return reply.code(400).send({ message: 'Текущий пароль указан неверно' });
+    await database()
+      .updateTable('users')
+      .set({ password_hash: await argon2.hash(input.next, { type: argon2.argon2id }) })
+      .where('id', '=', id)
+      .execute();
+    // остальные устройства выходят из аккаунта, текущее остаётся
+    await database()
+      .deleteFrom('sessions')
+      .where('user_id', '=', id)
+      .where('id', '!=', sid)
+      .execute();
+    return { ok: true };
+  },
+);
+
+// ===== Пользователи (администратор) =====
+const roleSchema = z.enum(['admin', 'user']);
+async function registrationMode() {
+  return (
+    (
+      await database()
+        .selectFrom('settings')
+        .select('value')
+        .where('key', '=', 'registration')
+        .executeTakeFirst()
+    )?.value ?? 'closed'
+  );
+}
+app.get('/api/admin/users', async (request) => {
+  await requireAdmin(request);
+  const users = await database()
+    .selectFrom('users')
+    .select(['id', 'name', 'email', 'role', 'created_at'])
+    .orderBy('created_at')
+    .execute();
+  return { users, registration: await registrationMode() };
+});
+app.put('/api/admin/registration', async (request) => {
+  await requireAdmin(request);
+  const { mode } = z.object({ mode: z.enum(['open', 'closed']) }).parse(request.body);
+  const exists = await database()
+    .selectFrom('settings')
+    .select('key')
+    .where('key', '=', 'registration')
+    .executeTakeFirst();
+  if (exists)
+    await database()
+      .updateTable('settings')
+      .set({ value: mode })
+      .where('key', '=', 'registration')
+      .execute();
+  else
+    await database().insertInto('settings').values({ key: 'registration', value: mode }).execute();
+  return { registration: mode };
+});
+app.post('/api/admin/users', async (request, reply) => {
+  await requireAdmin(request);
+  const input = registration.extend({ role: roleSchema.default('user') }).parse(request.body);
+  if (
+    await database()
+      .selectFrom('users')
+      .select('id')
+      .where('email', '=', input.email)
+      .executeTakeFirst()
+  )
+    return reply.code(409).send({ message: 'Этот адрес уже используется' });
+  const user = {
+    id: randomUUID(),
+    email: input.email,
+    name: input.name,
+    role: input.role,
+    created_at: new Date().toISOString(),
+  };
+  await database()
+    .insertInto('users')
+    .values({
+      ...user,
+      password_hash: await argon2.hash(input.password, { type: argon2.argon2id }),
+    })
+    .execute();
+  return user;
+});
+app.patch('/api/admin/users/:id', async (request) => {
+  const me = await requireAdmin(request);
+  const target = (request.params as { id: string }).id;
+  const { role, password } = z
+    .object({ role: roleSchema.optional(), password: z.string().min(10).max(256).optional() })
+    .parse(request.body);
+  if (password && target === me)
+    throw Object.assign(new Error('Свой пароль меняйте в разделе «Профиль»'), { statusCode: 400 });
+  const password_hash = password
+    ? await argon2.hash(password, { type: argon2.argon2id })
+    : undefined;
+  await database()
+    .transaction()
+    .execute(async (trx) => {
+      const user = await trx
+        .selectFrom('users')
+        .select('role')
+        .where('id', '=', target)
+        .executeTakeFirst();
+      if (!user) throw Object.assign(new Error('Пользователь не найден'), { statusCode: 404 });
+      if (role && user.role === 'admin' && role !== 'admin') {
+        const admins = await trx
+          .selectFrom('users')
+          .select(({ fn }) => fn.countAll<number>().as('n'))
+          .where('role', '=', 'admin')
+          .executeTakeFirstOrThrow();
+        if (Number(admins.n) <= 1)
+          throw Object.assign(new Error('Нельзя снять права с единственного администратора'), {
+            statusCode: 400,
+          });
+      }
+      if (role) await trx.updateTable('users').set({ role }).where('id', '=', target).execute();
+      if (password_hash) {
+        await trx.updateTable('users').set({ password_hash }).where('id', '=', target).execute();
+        // новый пароль выдан администратором — старые входы этого пользователя завершаются
+        await trx.deleteFrom('sessions').where('user_id', '=', target).execute();
+      }
+    });
   return { ok: true };
 });
 async function authorizeDocument(name: string, owner: string) {
