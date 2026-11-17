@@ -20,6 +20,13 @@ export type Config =
       password: string;
     };
 interface Database {
+  note_members: {
+    note_id: string;
+    user_id: string;
+    role: string;
+    accepted_at: string | null;
+    created_at: string;
+  };
   users: {
     id: string;
     email: string;
@@ -114,6 +121,26 @@ export async function openDatabase(config: Config): Promise<DB> {
     db: conn,
     provider: {
       getMigrations: async () => ({
+        '006_note_members': {
+          up: async (d: Kysely<unknown>) => {
+            await d.schema
+              .createTable('note_members')
+              .addColumn('note_id', 'varchar(36)', (c) => c.notNull())
+              .addColumn('user_id', 'varchar(36)', (c) =>
+                c.notNull().references('users.id').onDelete('cascade'),
+              )
+              .addColumn('role', 'varchar(20)', (c) => c.notNull())
+              .addColumn('accepted_at', 'varchar(30)')
+              .addColumn('created_at', 'varchar(30)', (c) => c.notNull())
+              .addPrimaryKeyConstraint('note_members_pk', ['note_id', 'user_id'])
+              .execute();
+            await d.schema
+              .createIndex('note_members_user')
+              .on('note_members')
+              .column('user_id')
+              .execute();
+          },
+        },
         '001_foundation': {
           up: async (d: Kysely<unknown>) => {
             await d.schema

@@ -102,7 +102,7 @@ export function History({
         </button>
       </header>
       <button
-        disabled={busy}
+        disabled={busy || !workspace.canEdit(id)}
         onClick={async () => {
           await workspace.saveVersion(id);
           setReload((n) => n + 1);
@@ -163,7 +163,11 @@ export function History({
           ) : (
             <VersionPreview doc={snapshot} userId={workspace.userId} />
           )}
-          <button className="primary" disabled={busy} onClick={() => void restore()}>
+          <button
+            className="primary"
+            disabled={busy || !workspace.canEdit(id)}
+            onClick={() => void restore()}
+          >
             {busy ? 'Восстанавливаем…' : 'Восстановить'}
           </button>
         </section>

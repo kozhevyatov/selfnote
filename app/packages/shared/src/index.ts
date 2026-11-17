@@ -12,6 +12,17 @@ export interface Notebook {
   color: string;
   icon?: string;
 }
+export type NoteRole = 'owner' | 'editor' | 'reader';
+export interface CollaborativeNote {
+  note: Note;
+  role: 'editor' | 'reader';
+  ownerName: string;
+  pending: boolean;
+}
+export interface CollaborationList {
+  notes: CollaborativeNote[];
+  owned: string[];
+}
 export interface Section {
   id: string;
   notebookId: string;

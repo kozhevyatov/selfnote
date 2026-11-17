@@ -1,3 +1,4 @@
+import { MembersDialog, Invitations, NotePresence } from './Collaboration';
 import { ColorPicker } from './ColorPicker';
 import { NotebookIcon, NotebookIconPicker } from './NotebookIcon';
 import { Switch } from './Switch';
@@ -250,6 +251,7 @@ function WorkspaceShell({
   const [appearance, setAppearanceState] = useState(storedAppearance);
   const [password, setPassword] = useState<PasswordMode | null>(null);
   const [sharing, setSharing] = useState(false);
+  const [members, setMembers] = useState(false);
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [remote, setRemote] = useState<{ id: string; parts: SnippetPart[] | null }[]>([]);
@@ -301,7 +303,10 @@ function WorkspaceShell({
     }
   };
   useEffect(() => {
-    if (ui.filter === 'shared') void refreshShared();
+    if (ui.filter === 'shared') {
+      void refreshShared();
+      void workspace.refreshCollaboration();
+    }
   }, [ui.filter]);
   useEffect(() => {
     if (!menu) return;
@@ -353,7 +358,7 @@ function WorkspaceShell({
         ['all', 'trash'].includes(ui.filter) ||
         (ui.filter === 'tasks' && workspace.extract(n.id).tasks.length > 0) ||
         (ui.filter === 'favorites' && Boolean(n.favorite)) ||
-        (ui.filter === 'shared' && sharedIds.has(n.id)) ||
+        (ui.filter === 'shared' && (sharedIds.has(n.id) || workspace.isCollaborative(n.id))) ||
         ui.filter === n.notebookId ||
         ui.filter === n.sectionId ||
         (ui.filter.startsWith('tag:') && n.tags.includes(ui.filter.slice(4))),
@@ -503,6 +508,7 @@ function WorkspaceShell({
     localStorage.setItem(`collapsed:${user.id}`, JSON.stringify([...next]));
   }
   function moveNote(id: string, notebookId: string | null, sectionId: string | null) {
+    if (!workspace.isOwner(id)) return;
     workspace.update(id, { notebookId, sectionId });
     const where = sectionId
       ? workspace.sections.get(sectionId)?.name
@@ -793,6 +799,7 @@ function WorkspaceShell({
             </button>
           )}
           <div className="notes-scroll">
+            {ui.filter === 'shared' && <Invitations workspace={workspace} />}
             {groupList.map(([group, items]) => (
               <section key={group} className="date-group">
                 <h2>
@@ -804,7 +811,7 @@ function WorkspaceShell({
                     key={note.id}
                     className={`note-row ${ui.selected === note.id ? 'selected' : ''}`}
                     onClick={() => ui.select(note.id)}
-                    draggable
+                    draggable={workspace.isOwner(note.id)}
                     onDragStart={(e) => {
                       e.dataTransfer.setData(NOTE_TYPE, note.id);
                       e.dataTransfer.effectAllowed = 'move';
@@ -812,6 +819,7 @@ function WorkspaceShell({
                     onDragEnd={() => setDropTarget(null)}
                     onContextMenu={(e) => {
                       e.preventDefault();
+                      if (!workspace.isOwner(note.id)) return;
                       const rect = e.currentTarget.getBoundingClientRect();
                       // с клавиатуры (Shift+F10, клавиша меню) координат нет — берём строку
                       const keyboard = e.clientX === 0 && e.clientY === 0;
@@ -851,7 +859,10 @@ function WorkspaceShell({
               <div className="empty">
                 <Users size={30} />
                 <h3>Пока нет общих заметок</h3>
-                <p>Откройте заметку и нажмите «Поделиться», чтобы создать публичную ссылку.</p>
+                <p>
+                  Откройте заметку и нажмите «Совместный доступ», чтобы пригласить пользователя, или
+                  «Поделиться» для публичной ссылки.
+                </p>
               </div>
             )}
             {!filtered.length && ui.filter === 'favorites' && !ui.query && (
@@ -943,6 +954,17 @@ function WorkspaceShell({
                 })}
               </time>
               <div className="editor-actions">
+                {!selected.encrypted && workspace.isOwner(selected.id) && (
+                  <button
+                    className="icon-button"
+                    title="Совместный доступ"
+                    aria-label="Совместный доступ"
+                    disabled={Boolean(selected.deletedAt)}
+                    onClick={() => setMembers(true)}
+                  >
+                    <Users size={18} />
+                  </button>
+                )}
                 {!selected.encrypted && (
                   <button
                     aria-label="История"
@@ -968,7 +990,7 @@ function WorkspaceShell({
                     className="icon-button"
                     title="Пароль на заметку"
                     aria-label="Пароль на заметку"
-                    disabled={Boolean(selected.deletedAt)}
+                    disabled={Boolean(selected.deletedAt) || !workspace.isOwner(selected.id)}
                     onClick={() => setPassword('set')}
                   >
                     <Lock size={18} />
@@ -978,7 +1000,7 @@ function WorkspaceShell({
                   className="icon-button"
                   title="Поделиться"
                   aria-label="Поделиться"
-                  disabled={Boolean(selected.deletedAt)}
+                  disabled={Boolean(selected.deletedAt) || !workspace.isOwner(selected.id)}
                   onClick={() => setSharing(true)}
                 >
                   <Share2 size={18} />
@@ -988,6 +1010,7 @@ function WorkspaceShell({
                   aria-label={selected.favorite ? 'Убрать из избранного' : 'В избранное'}
                   title={selected.favorite ? 'Убрать из избранного' : 'В избранное'}
                   aria-pressed={Boolean(selected.favorite)}
+                  disabled={!workspace.isOwner(selected.id)}
                   onClick={() => workspace.update(selected.id, { favorite: !selected.favorite })}
                 >
                   <Star size={18} fill={selected.favorite ? 'currentColor' : 'none'} />
@@ -997,6 +1020,7 @@ function WorkspaceShell({
                     className="icon-button"
                     title="Сохранить версию"
                     aria-label="Сохранить версию"
+                    disabled={!workspace.canEdit(selected.id)}
                     onClick={() => {
                       void workspace.saveVersion(selected.id);
                       ui.toast(
@@ -1012,6 +1036,7 @@ function WorkspaceShell({
                 <button
                   className={`icon-button ${selected.pinned ? 'active' : ''}`}
                   aria-label={selected.pinned ? 'Открепить заметку' : 'Закрепить заметку'}
+                  disabled={!workspace.isOwner(selected.id)}
                   onClick={() => workspace.update(selected.id, { pinned: !selected.pinned })}
                 >
                   <Pin size={17} />
@@ -1020,11 +1045,12 @@ function WorkspaceShell({
                   <button
                     className="icon-button"
                     aria-label="Действия с заметкой"
+                    disabled={!workspace.isOwner(selected.id)}
                     onClick={() => setMore(!more)}
                   >
                     <MoreHorizontal size={19} />
                   </button>
-                  {more && (
+                  {more && workspace.isOwner(selected.id) && (
                     <div className="popover note-menu">
                       <label>
                         Записная книжка
@@ -1147,6 +1173,45 @@ function WorkspaceShell({
                 </button>
               </div>
             </header>
+            {!selected.encrypted && (
+              <NotePresence
+                key={selected.id}
+                workspace={workspace}
+                id={selected.id}
+                name={user.name}
+              />
+            )}
+            {!workspace.isOwner(selected.id) && (
+              <div className="collaboration-banner">
+                <span>
+                  {
+                    workspace.collaboration.notes.find((row) => row.note.id === selected.id)
+                      ?.ownerName
+                  }{' '}
+                  · {workspace.canEdit(selected.id) ? 'Вы редактор' : 'Только чтение'}
+                </span>
+                <button
+                  onClick={async () => {
+                    if (
+                      !window.confirm(
+                        'Покинуть общую заметку? Для возврата потребуется новое приглашение.',
+                      )
+                    )
+                      return;
+                    try {
+                      await api(`/api/notes/${selected.id}/members/${user.id}`, {
+                        method: 'DELETE',
+                      });
+                      await workspace.refreshCollaboration();
+                    } catch (e) {
+                      ui.toast((e as Error).message);
+                    }
+                  }}
+                >
+                  Покинуть
+                </button>
+              </div>
+            )}
             {selected.tags.length > 0 && (
               <div className="note-tags">
                 {selected.tags.map((tag) => (
@@ -1338,7 +1403,10 @@ function WorkspaceShell({
           close={() => setPassword(null)}
         />
       )}
-      {sharing && selected && (
+      {members && selected && workspace.isOwner(selected.id) && !selected.encrypted && (
+        <MembersDialog workspace={workspace} id={selected.id} close={() => setMembers(false)} />
+      )}
+      {sharing && selected && workspace.isOwner(selected.id) && (
         <ShareDialog
           workspace={workspace}
           note={selected}
@@ -1558,8 +1626,10 @@ function TaskRows({
             <input
               type="checkbox"
               checked={task.checked}
+              disabled={!workspace.canEdit(task.noteId)}
               aria-label={`Выполнить: ${task.text || 'задача'}`}
               onChange={(e) => {
+                if (!workspace.canEdit(task.noteId)) return;
                 const doc = workspace.noteDoc(task.noteId);
                 if (!doc) return;
                 setTaskChecked(doc, task.id, e.target.checked);

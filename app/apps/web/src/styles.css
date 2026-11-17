@@ -2553,3 +2553,66 @@ small,
     margin-left: 0;
   }
 }
+
+/* Совместные заметки: участники, приглашения и присутствие. */
+.members-list {
+  display: grid;
+  gap: 12px;
+}
+.member-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--soft);
+}
+.member-row > div {
+  flex: 1 1 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.member-row > div > span {
+  display: block;
+  margin-top: 4px;
+}
+.member-row select {
+  flex: 1;
+  width: auto;
+}
+.invitations {
+  padding: 12px;
+}
+.invitation {
+  padding: 14px;
+  margin-bottom: 10px;
+  border-radius: 14px;
+  background: var(--soft);
+  overflow-wrap: anywhere;
+}
+.invitation p {
+  margin: 6px 0 10px;
+}
+.invitation > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.collaboration-banner,
+.note-presence {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 24px;
+  font-size: 13px;
+  color: var(--secondary);
+}
+.collaboration-banner {
+  background: var(--soft);
+  justify-content: space-between;
+}
+.note-presence {
+  color: var(--accent-text);
+}

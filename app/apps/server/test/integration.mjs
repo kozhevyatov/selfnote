@@ -540,6 +540,301 @@ try {
     '✓ Заметки под паролем: шифр вместо текста, версии и конфликт, ссылка, снятие пароля',
   );
 
+  // Совместная заметка между аккаунтами: приглашения, роли и серверные границы доступа.
+  const collabId = randomUUID();
+  const co = connect(`note:${collabId}`, owner.accessToken);
+  await waitFor(() => co.provider.isSynced, 'совместная заметка владельца');
+  spaceLive.doc.getMap('notes').set(
+    collabId,
+    new Y.Map(
+      Object.entries({
+        id: collabId,
+        title: 'Совместный план',
+        notebookId: null,
+        sectionId: null,
+        tags: [],
+        pinned: false,
+        deletedAt: null,
+        encrypted: false,
+        color: null,
+        updatedAt: new Date().toISOString(),
+      }),
+    ),
+  );
+  const cp = new Y.XmlElement('paragraph'),
+    ct = new Y.XmlText();
+  ct.insert(0, 'Коллаборация проверяется');
+  cp.insert(0, [ct]);
+  co.doc.getXmlFragment('content').insert(0, [cp]);
+  await waitFor(
+    () => !spaceLive.provider.hasUnsyncedChanges && !co.provider.hasUnsyncedChanges,
+    'метаданные совместной заметки',
+  );
+  const membersUrl = `/api/notes/${collabId}/members`;
+  r = await request(membersUrl, { email: 'other@example.test', role: 'editor' }, owner.accessToken);
+  assert.equal(r.status, 200, await r.text());
+  assert.equal((await request(membersUrl, undefined, other.accessToken)).status, 403);
+  let invitations = await (
+    await request('/api/collaboration', undefined, other.accessToken)
+  ).json();
+  assert.equal(invitations.notes.find((n) => n.note.id === collabId).pending, true);
+  assert.equal(
+    (await request(`/api/notes/${collabId}/versions`, undefined, other.accessToken)).status,
+    403,
+  );
+  const pendingClient = connect(`note:${collabId}`, other.accessToken);
+  let pendingDenied = false;
+  pendingClient.provider.on('authenticationFailed', () => {
+    pendingDenied = true;
+  });
+  await waitFor(() => pendingDenied, 'приглашение не даёт доступ до принятия');
+  pendingClient.provider.destroy();
+  pendingClient.socket.destroy();
+  assert.equal(
+    (await request(`/api/notes/${collabId}/membership/accept`, {}, other.accessToken)).status,
+    200,
+  );
+  const editorClient = connect(`note:${collabId}`, other.accessToken);
+  await waitFor(() => editorClient.provider.isSynced, 'приглашённый редактор');
+  assert.match(extractDocument(editorClient.doc).plainText, /Коллаборация/);
+  editorClient.doc.getMap('collaboration').set('title', 'Общее название');
+  const ep = new Y.XmlElement('paragraph'),
+    et = new Y.XmlText();
+  et.insert(0, 'Правка редактора');
+  ep.insert(0, [et]);
+  editorClient.doc.getXmlFragment('content').push([ep]);
+  await waitFor(
+    () => extractDocument(co.doc).plainText.includes('Правка редактора'),
+    'редактор меняет текст владельца',
+  );
+  assert.equal(co.doc.getMap('collaboration').get('title'), 'Общее название');
+  editorClient.socket.disconnect();
+  await waitFor(() => editorClient.socket.status === 'disconnected', 'редактор офлайн');
+  et.insert(et.length, ' офлайн');
+  ct.insert(ct.length, ' онлайн');
+  await editorClient.socket.connect();
+  await waitFor(
+    () =>
+      extractDocument(co.doc).plainText.includes('офлайн') &&
+      extractDocument(editorClient.doc).plainText.includes('онлайн'),
+    'слияние правок двух пользователей',
+  );
+  await waitFor(
+    async () =>
+      (
+        await (await request('/api/search?q=Коллаборация', undefined, other.accessToken)).json()
+      ).some((n) => n.id === collabId),
+    'поиск общей заметки',
+  );
+  r = await request('/api/auth/register', {
+    name: 'Читатель',
+    email: 'reader@example.test',
+    password: 'reader-password-2026',
+  });
+  assert.equal(r.status, 200);
+  const invitedReader = await r.json();
+  assert.equal(
+    (await request(membersUrl, { email: 'reader@example.test', role: 'reader' }, owner.accessToken))
+      .status,
+    200,
+  );
+  assert.equal(
+    (await request(`/api/notes/${collabId}/membership/accept`, {}, invitedReader.accessToken)).status,
+    200,
+  );
+  const readerClient = connect(`note:${collabId}`, invitedReader.accessToken);
+  await waitFor(() => readerClient.provider.isSynced, 'читатель синхронизирован');
+  assert.equal(readerClient.provider.authorizedScope, 'readonly');
+  readerClient.doc.getMap('collaboration').set('title', 'Запрещённая правка');
+  const bad = new Y.XmlElement('paragraph'),
+    badText = new Y.XmlText();
+  badText.insert(0, 'Читатель не должен писать');
+  bad.insert(0, [badText]);
+  readerClient.doc.getXmlFragment('content').push([bad]);
+  await delay(150);
+  assert.equal(co.doc.getMap('collaboration').get('title'), 'Общее название');
+  assert.ok(!extractDocument(co.doc).plainText.includes('Читатель не должен писать'));
+  const coVersions = `/api/notes/${collabId}/versions`;
+  const coState = Buffer.from(Y.encodeStateAsUpdate(editorClient.doc)).toString('base64');
+  assert.equal((await request(coVersions, { state: coState }, invitedReader.accessToken)).status, 403);
+  assert.equal((await request(coVersions, { state: coState }, other.accessToken)).status, 200);
+  const cv = await (await request(coVersions, undefined, invitedReader.accessToken)).json();
+  assert.ok(cv.some((v) => v.author === other.user.id));
+  assert.equal(
+    (await request(`${coVersions}/${cv[0].id}/restore`, {}, invitedReader.accessToken)).status,
+    403,
+  );
+  assert.equal(
+    (await request(`${coVersions}/${cv[0].id}/restore`, {}, other.accessToken)).status,
+    200,
+  );
+  assert.equal((await request(`/api/notes/${collabId}/shares`, {}, other.accessToken)).status, 404);
+  assert.equal(
+    (await request(membersUrl, { email: setup.email, role: 'editor' }, other.accessToken)).status,
+    403,
+  );
+  const privateSpace = connect(`space:${owner.user.id}`, other.accessToken);
+  let spaceDenied = false;
+  privateSpace.provider.on('authenticationFailed', () => {
+    spaceDenied = true;
+  });
+  await waitFor(() => spaceDenied, 'чужое пространство закрыто');
+  privateSpace.provider.destroy();
+  privateSpace.socket.destroy();
+  assert.equal((await request(attachment.url, undefined, invitedReader.accessToken)).status, 404);
+  const sharedForm = new FormData();
+  const sharedImage = await sharp({
+    create: { width: 12, height: 12, channels: 3, background: '#bb3344' },
+  })
+    .png()
+    .toBuffer();
+  sharedForm.append('file', new Blob([sharedImage], { type: 'image/png' }), 'shared.png');
+  assert.equal(
+    (
+      await fetch(`${base}/api/attachments?noteId=${collabId}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${invitedReader.accessToken}` },
+        body: sharedForm,
+      })
+    ).status,
+    403,
+  );
+  r = await fetch(`${base}/api/attachments?noteId=${collabId}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${other.accessToken}` },
+    body: sharedForm,
+  });
+  assert.equal(r.status, 200);
+  const sharedAttachment = await r.json();
+  const sharedImageNode = new Y.XmlElement('image');
+  sharedImageNode.setAttribute('src', sharedAttachment.url);
+  editorClient.doc.getXmlFragment('content').push([sharedImageNode]);
+  await waitFor(
+    () => co.doc.getXmlFragment('content').toString().includes(sharedAttachment.url),
+    'картинка редактора синхронизирована',
+  );
+  assert.equal((await request(sharedAttachment.url, undefined, invitedReader.accessToken)).status, 200);
+  assert.equal((await request(sharedAttachment.url, undefined, owner.accessToken)).status, 200);
+  assert.equal(
+    (await put(collabId, { version: 0, payload: envelope('нельзя'), attachments: [] })).status,
+    409,
+  );
+  // Понижение роли действует и для уже подключённого редактора.
+  assert.equal(
+    (
+      await request(
+        `${membersUrl}/${other.user.id}`,
+        { role: 'reader' },
+        owner.accessToken,
+        undefined,
+        'PATCH',
+      )
+    ).status,
+    200,
+  );
+  await waitFor(
+    () => editorClient.provider.authorizedScope === 'readonly' && editorClient.provider.isSynced,
+    'роль понижена на открытом соединении',
+  );
+  editorClient.doc.getMap('collaboration').set('title', 'После понижения');
+  await delay(150);
+  assert.equal(co.doc.getMap('collaboration').get('title'), 'Общее название');
+  assert.equal((await request(coVersions, { state: coState }, other.accessToken)).status, 403);
+  // Отзыв закрывает соединение, историю, картинки и серверный поиск.
+  let revoked = false;
+  editorClient.provider.on('authenticationFailed', () => {
+    revoked = true;
+  });
+  assert.equal(
+    (
+      await request(
+        `${membersUrl}/${other.user.id}`,
+        undefined,
+        owner.accessToken,
+        undefined,
+        'DELETE',
+      )
+    ).status,
+    200,
+  );
+  await waitFor(() => revoked, 'доступ отозван у открытого клиента');
+  editorClient.provider.destroy();
+  editorClient.socket.destroy();
+  assert.equal((await request(coVersions, undefined, other.accessToken)).status, 403);
+  assert.equal((await request(sharedAttachment.url, undefined, other.accessToken)).status, 404);
+  assert.ok(
+    !(
+      await (await request('/api/search?q=Коллаборация', undefined, other.accessToken)).json()
+    ).some((n) => n.id === collabId),
+  );
+  // Корзина скрывает заметку у участника, восстановление возвращает доступ.
+  spaceLive.doc.getMap('notes').get(collabId).set('deletedAt', new Date().toISOString());
+  await waitFor(
+    async () =>
+      !(
+        await (await request('/api/collaboration', undefined, invitedReader.accessToken)).json()
+      ).notes.some((n) => n.note.id === collabId),
+    'общая заметка в корзине скрыта',
+  );
+  assert.equal((await request(coVersions, undefined, invitedReader.accessToken)).status, 403);
+  spaceLive.doc.getMap('notes').get(collabId).set('deletedAt', null);
+  await waitFor(
+    async () =>
+      (
+        await (await request('/api/collaboration', undefined, invitedReader.accessToken)).json()
+      ).notes.some((n) => n.note.id === collabId),
+    'общая заметка восстановлена',
+  );
+  assert.equal(
+    (
+      await request(
+        `${membersUrl}/${invitedReader.user.id}`,
+        undefined,
+        invitedReader.accessToken,
+        undefined,
+        'DELETE',
+      )
+    ).status,
+    200,
+  );
+  // Приглашение можно отклонить и выдать заново.
+  assert.equal(
+    (await request(membersUrl, { email: 'reader@example.test', role: 'reader' }, owner.accessToken))
+      .status,
+    200,
+  );
+  assert.equal(
+    (
+      await request(
+        `${membersUrl}/${invitedReader.user.id}`,
+        undefined,
+        invitedReader.accessToken,
+        undefined,
+        'DELETE',
+      )
+    ).status,
+    200,
+  );
+  assert.equal(
+    (await request(membersUrl, { email: 'reader@example.test', role: 'editor' }, owner.accessToken))
+      .status,
+    200,
+  );
+  spaceLive.doc.transact(() => {
+    spaceLive.doc.getMap('purged').set(collabId, true);
+    spaceLive.doc.getMap('notes').delete(collabId);
+  });
+  await waitFor(
+    async () =>
+      !(
+        await (await request('/api/collaboration', undefined, invitedReader.accessToken)).json()
+      ).notes.some((n) => n.note.id === collabId),
+    'удаление общей заметки',
+  );
+  console.log(
+    '✓ Совместный доступ: приглашения, роли, офлайн-слияние, заголовок, история, вложения, отзыв, корзина и удаление',
+  );
+
   const csrf = await fetch(base + '/api/auth/logout', {
     method: 'POST',
     headers: { Origin: 'https://foreign.example', Cookie: cookie },

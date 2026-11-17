@@ -27,6 +27,8 @@ import {
   renderDocument,
   localDate,
   type Note,
+  type NoteRole,
+  type CollaborationList,
 } from '@selfnote/shared';
 import {
   db,
@@ -488,8 +490,8 @@ app.patch('/api/admin/users/:id', async (request) => {
     });
   return { ok: true };
 });
-async function authorizeDocument(name: string, owner: string) {
-  if (name === `space:${owner}`) return;
+async function authorizeDocument(name: string, owner: string, write = false): Promise<NoteRole> {
+  if (name === `space:${owner}`) return 'owner';
   if (!/^note:[0-9a-f-]{36}$/.test(name))
     throw Object.assign(new Error('Нет доступа'), { statusCode: 403 });
   const purged = await database()
@@ -505,8 +507,25 @@ async function authorizeDocument(name: string, owner: string) {
     .select('owner_id')
     .where('name', '=', name)
     .executeTakeFirst();
-  if (row && row.owner_id !== owner)
+  if (!row || row.owner_id === owner) return 'owner';
+  const member = await database()
+    .selectFrom('note_members')
+    .selectAll()
+    .where('note_id', '=', name.slice(5))
+    .where('user_id', '=', owner)
+    .where('accepted_at', 'is not', null)
+    .executeTakeFirst();
+  const meta = member ? await spaceNote(row.owner_id, name.slice(5)) : null;
+  if (
+    !member ||
+    !meta ||
+    meta.deletedAt ||
+    meta.encrypted ||
+    (member.role !== 'editor' && member.role !== 'reader') ||
+    (write && member.role !== 'editor')
+  )
     throw Object.assign(new Error('Нет доступа'), { statusCode: 403 });
+  return member.role as NoteRole;
 }
 let saving: Promise<unknown> = Promise.resolve();
 function serializeDocuments<T>(operation: () => Promise<T>): Promise<T> {
@@ -514,8 +533,8 @@ function serializeDocuments<T>(operation: () => Promise<T>): Promise<T> {
   saving = next.catch(() => undefined);
   return next;
 }
-function saveDocument(name: string, document: Y.Doc, owner: string) {
-  return serializeDocuments(() => storeDocument(name, document, owner));
+function saveDocument(name: string, document: Y.Doc, owner: string, author = owner) {
+  return serializeDocuments(() => storeDocument(name, document, owner, author));
 }
 async function encryptedRow(noteId: string) {
   return database()
@@ -524,7 +543,7 @@ async function encryptedRow(noteId: string) {
     .where('note_id', '=', noteId)
     .executeTakeFirst();
 }
-async function storeDocument(name: string, document: Y.Doc, owner: string) {
+async function storeDocument(name: string, document: Y.Doc, owner: string, author = owner) {
   if (
     name.startsWith('note:') &&
     ((await database()
@@ -598,6 +617,7 @@ async function storeDocument(name: string, document: Y.Doc, owner: string) {
           await trx.deleteFrom('notes_index').where('note_id', '=', id).execute();
           await trx.deleteFrom('encrypted_notes').where('note_id', '=', id).execute();
           await trx.deleteFrom('shares').where('note_id', '=', id).execute();
+          await trx.deleteFrom('note_members').where('note_id', '=', id).execute();
         }
         const deleted = [...deletedNoteIds(document)];
         let restore = trx
@@ -676,7 +696,7 @@ async function storeDocument(name: string, document: Y.Doc, owner: string) {
         if (!last || Date.now() - Date.parse(last.created_at) >= 300000) {
           await trx
             .insertInto('note_versions')
-            .values({ id: randomUUID(), note_id: noteId, author: owner, state, created_at: now })
+            .values({ id: randomUUID(), note_id: noteId, author, state, created_at: now })
             .execute();
           await pruneVersions(trx, noteId);
         }
@@ -715,7 +735,7 @@ const collab = new Hocuspocus({
   name: 'selfnote',
   debounce: 500,
   maxDebounce: 2000,
-  async onAuthenticate({ token, documentName }) {
+  async onAuthenticate({ token, documentName, connectionConfig }) {
     if (maintenance) throw new Error('Идёт восстановление из резервной копии');
     const claims = app.jwt.verify<{ sub: string; sid: string }>(token);
     const session = await database()
@@ -726,13 +746,15 @@ const collab = new Hocuspocus({
       .where('expires_at', '>', new Date().toISOString())
       .executeTakeFirst();
     if (!session) throw new Error('Сессия завершена');
-    await authorizeDocument(documentName, claims.sub);
+    const role = await authorizeDocument(documentName, claims.sub);
+    connectionConfig.readOnly = role === 'reader';
     return { owner: claims.sub, sid: claims.sid };
   },
-  async beforeHandleMessage({ context, documentName }) {
+  async beforeHandleMessage({ context, documentName, connection }) {
     if (maintenance) throw new Error('Идёт восстановление из резервной копии');
     await restoring;
-    await authorizeDocument(documentName, (context as { owner: string }).owner);
+    const role = await authorizeDocument(documentName, (context as { owner: string }).owner);
+    connection.readOnly = role === 'reader';
     const { owner, sid } = context as { owner: string; sid: string };
     const session = await database()
       .selectFrom('sessions')
@@ -771,34 +793,80 @@ const collab = new Hocuspocus({
       }
     }
     if (row) {
-      if (row.owner_id !== owner)
-        throw Object.assign(new Error('Нет доступа'), { statusCode: 403 });
+      await authorizeDocument(documentName, owner);
       Y.applyUpdate(document, row.state);
     }
     return document;
   },
+  async onChange({ documentName, document }) {
+    if (documentName.startsWith('space:')) {
+      const owner = documentName.slice(6);
+      for (const id of new Set([
+        ...deletedNoteIds(document),
+        ...document.getMap('purged').keys(),
+      ])) {
+        const row = await database()
+          .selectFrom('yjs_documents')
+          .select('owner_id')
+          .where('name', '=', `note:${id}`)
+          .executeTakeFirst();
+        if (row?.owner_id === owner) resetNoteConnections(id, undefined, owner);
+      }
+    }
+  },
   async onStoreDocument({ documentName, document, context }) {
     const { owner, historyOperation } = context as { owner: string; historyOperation?: boolean };
-    if (historyOperation) await storeDocument(documentName, document, owner);
-    else await saveDocument(documentName, document, owner);
+    // Владелец документа неизменен; автор правок может быть приглашённым редактором.
+    const row = await database()
+      .selectFrom('yjs_documents')
+      .select('owner_id')
+      .where('name', '=', documentName)
+      .executeTakeFirst();
+    const documentOwner = row?.owner_id ?? owner;
+    if (historyOperation) await storeDocument(documentName, document, documentOwner, owner);
+    else await saveDocument(documentName, document, documentOwner, owner);
   },
 });
 app.get('/collab', { websocket: true }, (socket, request) =>
   collab.handleConnection(socket, request.raw),
 );
+async function accessibleSharedIds(user: string) {
+  const members = await database()
+    .selectFrom('note_members')
+    .select('note_id')
+    .where('user_id', '=', user)
+    .where('accepted_at', 'is not', null)
+    .execute();
+  const ids: string[] = [];
+  for (const member of members) {
+    try {
+      await ownedNote(member.note_id, user);
+      ids.push(member.note_id);
+    } catch {
+      /* Доступ отозван или заметка в корзине. */
+    }
+  }
+  return ids;
+}
 app.get('/api/tasks', async (request) => {
   const owner = await userId(request);
+  const shared = await accessibleSharedIds(owner);
   // задачи из заметок в корзине не показываем
   return database()
     .selectFrom('tasks')
     .innerJoin('notes_index', 'notes_index.note_id', 'tasks.note_id')
     .selectAll('tasks')
-    .where('tasks.owner_id', '=', owner)
+    .where((eb) =>
+      eb.or([
+        eb('tasks.owner_id', '=', owner),
+        ...(shared.length ? [eb('tasks.note_id', 'in', shared)] : []),
+      ]),
+    )
     .where('notes_index.deleted', '=', 0)
     .execute();
 });
-async function ownedNote(id: string, owner: string) {
-  await authorizeDocument(`note:${id}`, owner);
+async function ownedNote(id: string, owner: string, write = false) {
+  await authorizeDocument(`note:${id}`, owner, write);
   const row = await database()
     .selectFrom('yjs_documents')
     .select('name')
@@ -842,7 +910,7 @@ app.post('/api/notes/:id/versions/:vid/restore', async (request) => {
   const owner = await userId(request);
   const { id, vid } = z.object({ id: z.uuid(), vid: z.uuid() }).parse(request.params);
   const work = serializeDocuments(async () => {
-    await ownedNote(id, owner);
+    await ownedNote(id, owner, true);
     const version = await database()
       .selectFrom('note_versions')
       .select('state')
@@ -897,7 +965,7 @@ app.post('/api/notes/:id/versions', { bodyLimit: 24 * 1024 * 1024 }, async (requ
   const id = z.uuid().parse((request.params as { id: string }).id);
   const { state } = z.object({ state: z.string().max(20 * 1024 * 1024) }).parse(request.body);
   return serializeDocuments(async () => {
-    await authorizeDocument(`note:${id}`, owner);
+    await authorizeDocument(`note:${id}`, owner, true);
     const row = await database()
       .selectFrom('yjs_documents')
       .select('owner_id')
@@ -926,7 +994,18 @@ app.post('/api/notes/:id/versions', { bodyLimit: 24 * 1024 * 1024 }, async (requ
   });
 });
 app.post('/api/attachments', async (request, reply) => {
-  const owner = await userId(request);
+  const actor = await userId(request);
+  let owner = actor;
+  const { noteId } = z.object({ noteId: z.uuid().optional() }).parse(request.query);
+  if (noteId) {
+    await ownedNote(noteId, actor, true);
+    const row = await database()
+      .selectFrom('yjs_documents')
+      .select('owner_id')
+      .where('name', '=', `note:${noteId}`)
+      .executeTakeFirstOrThrow();
+    owner = row.owner_id;
+  }
   const file = await request.file();
   if (!file) return reply.code(400).send({ message: 'Выберите изображение' });
   const input = await file.toBuffer();
@@ -987,12 +1066,74 @@ app.get('/api/attachments/:id', async (request, reply) => {
     .string()
     .regex(/^[a-f0-9]{64}$/)
     .parse((request.params as { id: string }).id);
-  const row = await database()
+  let row = await database()
     .selectFrom('attachments')
     .select('id')
     .where('id', '=', id)
     .where('owner_id', '=', owner)
     .executeTakeFirst();
+  if (!row) {
+    const memberships = await database()
+      .selectFrom('note_members')
+      .select('note_id')
+      .where('user_id', '=', owner)
+      .where('accepted_at', 'is not', null)
+      .execute();
+    for (const member of memberships) {
+      try {
+        await ownedNote(member.note_id, owner);
+      } catch {
+        continue;
+      }
+      const source = await database()
+        .selectFrom('yjs_documents')
+        .select('owner_id')
+        .where('name', '=', `note:${member.note_id}`)
+        .executeTakeFirst();
+      if (!source) continue;
+      const content = await noteDocument(member.note_id);
+      let referenced = false;
+      if (content) {
+        try {
+          referenced = renderDocument(content.doc.getXmlFragment('content')).images.includes(
+            `/api/attachments/${id}`,
+          );
+        } finally {
+          content.release();
+        }
+      }
+      if (!referenced) {
+        const versions = await database()
+          .selectFrom('note_versions')
+          .select('state')
+          .where('note_id', '=', member.note_id)
+          .execute();
+        for (const version of versions) {
+          const doc = new Y.Doc();
+          try {
+            Y.applyUpdate(doc, version.state);
+            referenced = renderDocument(doc.getXmlFragment('content')).images.includes(
+              `/api/attachments/${id}`,
+            );
+          } finally {
+            doc.destroy();
+          }
+          if (referenced) break;
+        }
+      }
+      if (!referenced) continue;
+      row = await database()
+        .selectFrom('attachments')
+        .select('id')
+        .where('id', '=', id)
+        .where('owner_id', '=', source.owner_id)
+        .executeTakeFirst();
+      if (row) {
+        owner = source.owner_id;
+        break;
+      }
+    }
+  }
   if (!row) return reply.code(404).send();
   const preview = (request.query as { preview?: string }).preview === '1';
   reply.header('Cache-Control', 'private, no-store');
@@ -1112,6 +1253,7 @@ cleanupTimer.unref();
 app.get('/api/search', async (request) => {
   const owner = await userId(request);
   const { q } = z.object({ q: z.string().max(200) }).parse(request.query);
+  const shared = await accessibleSharedIds(owner);
   const terms = searchTerms(q);
   if (!terms.length) return [];
   let rows: { note_id: string; plain_text: string }[];
@@ -1122,7 +1264,12 @@ app.get('/api/search', async (request) => {
     let query = database()
       .selectFrom('notes_index')
       .select(['note_id', 'plain_text'])
-      .where('owner_id', '=', owner)
+      .where((eb) =>
+        eb.or([
+          eb('owner_id', '=', owner),
+          ...(shared.length ? [eb('note_id', 'in', shared)] : []),
+        ]),
+      )
       .where('deleted', '=', 0);
     if (long.length)
       query = query.where(
@@ -1136,7 +1283,7 @@ app.get('/api/search', async (request) => {
       await sql<{ note_id: string; plain_text: string }>`
         SELECT n.note_id, n.plain_text FROM notes_fts
         JOIN notes_index n ON n.rowid = notes_fts.rowid
-        WHERE notes_fts MATCH ${match} AND n.owner_id = ${owner} AND n.deleted = 0
+        WHERE notes_fts MATCH ${match} AND (n.owner_id = ${owner} ${shared.length ? sql`OR n.note_id IN (${sql.join(shared)})` : sql``}) AND n.deleted = 0
         ORDER BY rank LIMIT 50`.execute(database())
     ).rows;
   }
@@ -1198,6 +1345,13 @@ app.put('/api/encrypted/:id', { bodyLimit: 32 * 1024 * 1024 }, async (request, r
     )
       return reply.code(410).send({ message: 'Заметка удалена навсегда' });
     const now = new Date().toISOString();
+    const members = await database()
+      .selectFrom('note_members')
+      .select('user_id')
+      .where('note_id', '=', id)
+      .executeTakeFirst();
+    if (members)
+      return reply.code(409).send({ message: 'Сначала отзовите совместный доступ и приглашения' });
     const attachments = JSON.stringify(input.attachments);
     const row = await encryptedRow(id);
     if (row && row.owner_id !== owner) return reply.code(403).send({ message: 'Нет доступа' });
@@ -1231,6 +1385,7 @@ app.put('/api/encrypted/:id', { bodyLimit: 32 * 1024 * 1024 }, async (request, r
           await trx.deleteFrom('tasks').where('note_id', '=', id).execute();
           await trx.deleteFrom('note_versions').where('note_id', '=', id).execute();
           await trx.deleteFrom('shares').where('note_id', '=', id).execute();
+          await trx.deleteFrom('note_members').where('note_id', '=', id).execute();
         });
       collab.closeConnections(`note:${id}`);
       return { version: 1, updated_at: now };
@@ -1262,7 +1417,211 @@ app.delete('/api/encrypted/:id', async (request, reply) => {
       .execute(async (trx) => {
         await trx.deleteFrom('encrypted_notes').where('note_id', '=', id).execute();
         await trx.deleteFrom('shares').where('note_id', '=', id).execute();
+        await trx.deleteFrom('note_members').where('note_id', '=', id).execute();
       });
+    return { ok: true };
+  });
+});
+
+// ===== Совместный доступ зарегистрированных пользователей =====
+/** Закрываем транспорт участника: провайдер сам повторит вход и получит новую роль. */
+function resetNoteConnections(id: string, userId?: string, except?: string) {
+  const document = collab.documents.get(`note:${id}`);
+  if (!document) return;
+  for (const { connection } of document.connections.values()) {
+    const actor = (connection.context as { owner: string }).owner;
+    if ((!userId || actor === userId) && actor !== except)
+      connection.webSocket.close(4205, 'Права доступа изменились');
+  }
+}
+async function manageNote(id: string, user: string) {
+  if ((await ownedNoteKind(id, user)) !== 'plain')
+    throw Object.assign(new Error('Только владелец обычной заметки может управлять доступом'), {
+      statusCode: 403,
+    });
+  const meta = await spaceNote(user, id);
+  if (!meta || meta.deletedAt || meta.encrypted)
+    throw Object.assign(new Error('Заметка недоступна'), { statusCode: 409 });
+  return meta;
+}
+app.get('/api/collaboration', async (request): Promise<CollaborationList> => {
+  const user = await userId(request);
+  const rows = await database()
+    .selectFrom('note_members')
+    .innerJoin('yjs_documents', (join) =>
+      join.on(
+        'yjs_documents.name',
+        '=',
+        dbType === 'sqlite'
+          ? sql<string>`'note:' || note_members.note_id`
+          : sql<string>`concat('note:', note_members.note_id)`,
+      ),
+    )
+    .innerJoin('users', 'users.id', 'yjs_documents.owner_id')
+    .select([
+      'note_members.note_id',
+      'note_members.role',
+      'note_members.accepted_at',
+      'users.name as owner_name',
+      'yjs_documents.owner_id',
+    ])
+    .where('note_members.user_id', '=', user)
+    .execute();
+  const notes: CollaborationList['notes'] = [];
+  for (const row of rows) {
+    const meta = await spaceNote(row.owner_id, row.note_id);
+    if (!meta || meta.deletedAt || meta.encrypted || (await encryptedRow(row.note_id))) continue;
+    notes.push({
+      note: {
+        ...meta,
+        notebookId: null,
+        sectionId: null,
+        tags: [],
+        pinned: false,
+        favorite: false,
+      },
+      role: row.role as 'editor' | 'reader',
+      ownerName: row.owner_name,
+      pending: !row.accepted_at,
+    });
+  }
+  const ownedRows = await database()
+    .selectFrom('note_members')
+    .select('note_id')
+    .distinct()
+    .execute();
+  const owned: string[] = [];
+  for (const row of ownedRows)
+    if ((await ownedNoteKind(row.note_id, user)) === 'plain') owned.push(row.note_id);
+  return { notes, owned };
+});
+app.get('/api/notes/:id/members', async (request) => {
+  const user = await userId(request);
+  const id = z.uuid().parse((request.params as { id: string }).id);
+  await manageNote(id, user);
+  return database()
+    .selectFrom('note_members')
+    .innerJoin('users', 'users.id', 'note_members.user_id')
+    .select([
+      'users.id',
+      'users.name',
+      'users.email',
+      'note_members.role',
+      'note_members.accepted_at',
+    ])
+    .where('note_members.note_id', '=', id)
+    .orderBy('note_members.created_at')
+    .execute();
+});
+app.post(
+  '/api/notes/:id/members',
+  { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } },
+  async (request) => {
+    const user = await userId(request);
+    const id = z.uuid().parse((request.params as { id: string }).id);
+    const input = z
+      .object({
+        email: z.email().transform((v) => v.toLowerCase()),
+        role: z.enum(['editor', 'reader']),
+      })
+      .parse(request.body);
+    return serializeDocuments(async () => {
+      const meta = await manageNote(id, user);
+      const target = await database()
+        .selectFrom('users')
+        .select('id')
+        .where('email', '=', input.email)
+        .executeTakeFirst();
+      if (!target)
+        throw Object.assign(new Error('Пользователь с таким адресом не найден'), {
+          statusCode: 404,
+        });
+      if (target.id === user)
+        throw Object.assign(new Error('Вы уже владелец этой заметки'), { statusCode: 400 });
+      const exists = await database()
+        .selectFrom('note_members')
+        .select('user_id')
+        .where('note_id', '=', id)
+        .where('user_id', '=', target.id)
+        .executeTakeFirst();
+      if (exists) throw Object.assign(new Error('Пользователь уже приглашён'), { statusCode: 409 });
+      // Общий заголовок хранится в документе заметки, чужое пространство не раскрывается.
+      const connection = await collab.openDirectConnection(`note:${id}`, {
+        owner: user,
+        historyOperation: true,
+      });
+      try {
+        await connection.transact((doc) => {
+          const fields = doc.getMap('collaboration');
+          if (!fields.has('title')) fields.set('title', meta.title);
+          if (!fields.has('updatedAt')) fields.set('updatedAt', meta.updatedAt);
+        });
+      } finally {
+        await connection.disconnect();
+      }
+      await database()
+        .insertInto('note_members')
+        .values({
+          note_id: id,
+          user_id: target.id,
+          role: input.role,
+          accepted_at: null,
+          created_at: new Date().toISOString(),
+        })
+        .execute();
+      return { ok: true };
+    });
+  },
+);
+app.patch('/api/notes/:id/members/:uid', async (request) => {
+  const user = await userId(request);
+  const { id, uid } = z.object({ id: z.uuid(), uid: z.uuid() }).parse(request.params);
+  const { role } = z.object({ role: z.enum(['editor', 'reader']) }).parse(request.body);
+  return serializeDocuments(async () => {
+    await manageNote(id, user);
+    await database()
+      .updateTable('note_members')
+      .set({ role })
+      .where('note_id', '=', id)
+      .where('user_id', '=', uid)
+      .execute();
+    resetNoteConnections(id, uid);
+    return { ok: true };
+  });
+});
+app.post('/api/notes/:id/membership/accept', async (request) => {
+  const user = await userId(request);
+  const id = z.uuid().parse((request.params as { id: string }).id);
+  return serializeDocuments(async () => {
+    const doc = await database()
+      .selectFrom('yjs_documents')
+      .select('owner_id')
+      .where('name', '=', `note:${id}`)
+      .executeTakeFirst();
+    if (!doc) throw Object.assign(new Error('Приглашение недоступно'), { statusCode: 404 });
+    await manageNote(id, doc.owner_id);
+    const result = await database()
+      .updateTable('note_members')
+      .set({ accepted_at: new Date().toISOString() })
+      .where('note_id', '=', id)
+      .where('user_id', '=', user)
+      .executeTakeFirst();
+    if (!Number(result.numUpdatedRows))
+      throw Object.assign(new Error('Приглашение отозвано'), { statusCode: 404 });
+    return { ok: true };
+  });
+});
+app.delete('/api/notes/:id/members/:uid', async (request) => {
+  const user = await userId(request);
+  const { id, uid } = z.object({ id: z.uuid(), uid: z.uuid() }).parse(request.params);
+  return serializeDocuments(async () => {
+    if (uid !== user) await manageNote(id, user);
+    await database()
+      .deleteFrom('note_members')
+      .where('note_id', '=', id)
+      .where('user_id', '=', uid)
+      .execute();
+    resetNoteConnections(id, uid);
     return { ok: true };
   });
 });
@@ -1285,7 +1644,23 @@ async function spaceNote(owner: string, noteId: string): Promise<Note | null> {
   try {
     const value = doc.getMap<unknown>('notes').get(noteId);
     if (!value) return null;
-    return (value instanceof Y.Map ? value.toJSON() : value) as Note;
+    const meta = (value instanceof Y.Map ? value.toJSON() : value) as Note;
+    const content = await noteDocument(noteId);
+    if (!content) return meta;
+    try {
+      const fields = content.doc.getMap('collaboration');
+      const title = fields.get('title'),
+        updatedAt = fields.get('updatedAt');
+      return {
+        ...meta,
+        ...(typeof title === 'string' ? { title } : {}),
+        ...(typeof updatedAt === 'string' && Number.isFinite(Date.parse(updatedAt))
+          ? { updatedAt }
+          : {}),
+      };
+    } finally {
+      content.release();
+    }
   } finally {
     temporary?.destroy();
   }

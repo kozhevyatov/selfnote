@@ -8,6 +8,8 @@ import {
   type Note,
   type Notebook,
   type Section,
+  type CollaborationList,
+  type NoteRole,
 } from '@selfnote/shared';
 import { api, refresh, token } from './api';
 import { uuid } from './ids';
@@ -71,7 +73,69 @@ export class Workspace {
   /** Документы, к которым сервер не пустил (удалены, под паролем и т. п.). */
   private failed = new Set<string>();
   readonly secure: SecureNotes;
+  collaboration: CollaborationList = { notes: [], owned: [] };
+  private collaborationTimer: ReturnType<typeof setInterval>;
+  private loadingCollaboration = false;
+  private collaborationAgain = false;
+  isOwner(id: string) {
+    return this.noteMap.has(id);
+  }
+  role(id: string): NoteRole {
+    if (this.isOwner(id)) return 'owner';
+    return (
+      this.collaboration.notes.find((row) => row.note.id === id && !row.pending)?.role ?? 'reader'
+    );
+  }
+  canEdit(id: string) {
+    return (
+      this.role(id) !== 'reader' && this.notes.get(id)?.provider.authorizedScope !== 'readonly'
+    );
+  }
+  isCollaborative(id: string) {
+    return (
+      this.collaboration.owned.includes(id) ||
+      this.collaboration.notes.some((row) => row.note.id === id && !row.pending)
+    );
+  }
+  async refreshCollaboration() {
+    if (this.stopped || !navigator.onLine) return;
+    if (this.loadingCollaboration) {
+      this.collaborationAgain = true;
+      return;
+    }
+    this.loadingCollaboration = true;
+    try {
+      const next = await api<CollaborationList>('/api/collaboration');
+      if (this.stopped) return;
+      for (const row of this.collaboration.notes) {
+        const updated = next.notes.find((n) => n.note.id === row.note.id && !n.pending);
+        if (!row.pending && (!updated || updated.role !== row.role)) this.dropPlain(row.note.id);
+      }
+      this.collaboration = next;
+      localStorage.setItem(`collaboration:${this.userId}`, JSON.stringify(next));
+      this.notesCache = null;
+      this.loadNotes();
+      if (useUI.getState().selected && !this.metadata.has(useUI.getState().selected!))
+        useUI.getState().select(null);
+      this.emit();
+    } catch {
+      /* Офлайн доступна последняя синхронизированная копия. */
+    } finally {
+      this.loadingCollaboration = false;
+      if (this.collaborationAgain) {
+        this.collaborationAgain = false;
+        void this.refreshCollaboration();
+      }
+    }
+  }
   constructor(readonly userId: string) {
+    try {
+      this.collaboration =
+        JSON.parse(localStorage.getItem(`collaboration:${userId}`) || 'null') ?? this.collaboration;
+    } catch {
+      /* Повреждённый кэш будет восстановлен с сервера. */
+    }
+    this.collaborationTimer = setInterval(() => void this.refreshCollaboration(), 10000);
     this.secure = new SecureNotes(this);
     this.socket = new HocuspocusProviderWebsocket({
       url: `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/collab`,
@@ -85,6 +149,7 @@ export class Workspace {
     this.space.ready.then(() => {
       this.cleanTrash();
       this.loadNotes();
+      void this.refreshCollaboration();
       void this.secure.sync();
     });
     this.timer = setInterval(() => {
@@ -102,6 +167,7 @@ export class Workspace {
     void refresh()
       .then(() => {
         if (this.stopped) return;
+        void this.refreshCollaboration();
         void this.socket.connect();
         void this.flushVersions();
         void this.secure.sync();
@@ -120,6 +186,10 @@ export class Workspace {
         return token();
       },
       onStatus: () => this.emit(),
+      onAuthenticated: () => {
+        this.emit();
+        void this.refreshCollaboration();
+      },
       onSynced: () => {
         this.failed.delete(name);
         if (name.startsWith('space:')) {
@@ -132,6 +202,18 @@ export class Workspace {
       onUnsyncedChanges: () => this.emit(),
       onAuthenticationFailed: () => {
         this.failed.add(name);
+        if (name.startsWith('note:') && !this.isOwner(name.slice(5))) {
+          // Отзыв доступа подтверждён сервером: закрываем заметку до обновления списка.
+          queueMicrotask(() => {
+            this.collaboration.notes = this.collaboration.notes.filter(
+              (row) => row.note.id !== name.slice(5),
+            );
+            this.notesCache = null;
+            this.dropPlain(name.slice(5));
+            if (useUI.getState().selected === name.slice(5)) useUI.getState().select(null);
+            void this.refreshCollaboration();
+          });
+        }
         this.emit();
       },
     });
@@ -153,6 +235,22 @@ export class Workspace {
     if (!this.notesCache) {
       this.notesCache = new Map();
       for (const [id, value] of this.noteMap) this.notesCache.set(id, toNote(value));
+      for (const row of this.collaboration.notes)
+        if (!row.pending && !this.notesCache.has(row.note.id))
+          this.notesCache.set(row.note.id, row.note);
+      for (const [id, meta] of this.notesCache) {
+        const fields = this.notes.get(id)?.doc.getMap('collaboration');
+        const title = fields?.get('title'),
+          updatedAt = fields?.get('updatedAt');
+        if (typeof title === 'string')
+          this.notesCache.set(id, {
+            ...meta,
+            title,
+            ...(typeof updatedAt === 'string' && Number.isFinite(Date.parse(updatedAt))
+              ? { updatedAt }
+              : {}),
+          });
+      }
     }
     return this.notesCache as ReadonlyMap<string, Note>;
   }
@@ -177,7 +275,7 @@ export class Workspace {
   }
   private loadNotes() {
     for (const id of [...this.notes.keys()])
-      if (!this.noteMap.has(id)) {
+      if (!this.metadata.has(id)) {
         this.dropPlain(id);
         if (useUI.getState().selected === id) useUI.getState().select(null);
       } else if (this.metadata.get(id)?.encrypted) this.dropPlain(id);
@@ -240,8 +338,10 @@ export class Workspace {
       entry = this.create(`note:${id}`);
       this.notes.set(id, entry);
       entry.doc.on('update', (_update: Uint8Array, origin: unknown) => {
+        this.notesCache = null;
         this.extracted.delete(id);
         if (origin !== entry!.local) this.markVersion(id);
+        this.emit();
       });
       entry.ready.then(() => this.emit());
     }
@@ -263,6 +363,14 @@ export class Workspace {
    * (пустой patch) или названия — перенос, закрепление, метки не поднимают заметку в списке.
    */
   update(id: string, patch: Partial<Note>, touch = !Object.keys(patch).length || 'title' in patch) {
+    if (!this.canEdit(id)) return;
+    const doc = this.notes.get(id)?.doc;
+    const shared = doc?.getMap('collaboration');
+    if (shared?.has('title'))
+      doc!.transact(() => {
+        if (patch.title !== undefined) shared.set('title', patch.title);
+        if (touch) shared.set('updatedAt', new Date().toISOString());
+      });
     const current = this.noteMap.get(id);
     if (!current) return;
     this.space.doc.transact(() => {
@@ -464,7 +572,7 @@ export class Workspace {
     for (const callback of this.callbacks) callback();
   };
   markVersion(id: string) {
-    if (!this.metadata.has(id) || this.metadata.get(id)?.encrypted) return;
+    if (!this.canEdit(id) || !this.metadata.has(id) || this.metadata.get(id)?.encrypted) return;
     localStorage.setItem(`version:${this.userId}:${id}`, '1');
   }
   async saveVersion(id: string) {
@@ -486,6 +594,7 @@ export class Workspace {
       for (const [id, entry] of this.notes) {
         const key = `version:${this.userId}:${id}`;
         if (
+          !this.canEdit(id) ||
           !localStorage.getItem(key) ||
           !entry.provider.isSynced ||
           entry.provider.hasUnsyncedChanges
@@ -512,6 +621,7 @@ export class Workspace {
     this.stopped = true;
     this.secure.destroy();
     clearInterval(this.timer);
+    clearInterval(this.collaborationTimer);
     window.removeEventListener('online', this.reconnect);
     window.removeEventListener('pagehide', this.onHide);
     for (const entry of [this.space, ...this.notes.values()]) {

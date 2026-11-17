@@ -91,7 +91,11 @@ export async function flushImages(workspace: Workspace) {
         if (!remote) {
           const form = new FormData();
           form.append('file', record.blob, 'image');
-          const result = await api<{ url: string }>('/api/attachments', {
+          const noteId = [...workspace.notes].find(([, entry]) => entry.doc === doc)?.[0];
+          if (noteId && !workspace.canEdit(noteId)) continue;
+          if (noteId) await workspace.whenSynced(noteId);
+          const url = noteId ? `/api/attachments?noteId=${noteId}` : '/api/attachments';
+          const result = await api<{ url: string }>(url, {
             method: 'POST',
             body: form,
           });

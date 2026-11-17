@@ -263,6 +263,7 @@ const TaskIds = Extension.create({
     return [
       new Plugin({
         appendTransaction: (_transactions, _old, state) => {
+          if (!this.editor.isEditable) return null;
           const ids = new Set<string>();
           const tr = state.tr;
           state.doc.descendants((node, pos) => {
@@ -352,7 +353,7 @@ function PlainEditor({ workspace, id }: { workspace: Workspace; id: string }) {
     };
   }, [entry, workspace, id]);
   return ready ? (
-    <EditorBody workspace={workspace} id={id} doc={entry.doc} />
+    <EditorBody key={entry.doc.guid} workspace={workspace} id={id} doc={entry.doc} />
   ) : (
     <div className="empty">Открываем заметку…</div>
   );
@@ -410,7 +411,9 @@ function EditorBody({ workspace, id, doc }: { workspace: Workspace; id: string; 
   const [link, setLink] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
   const toast = useUI((s) => s.toast);
+  const editable = workspace.canEdit(id);
   const editor = useEditor({
+    editable,
     extensions: [
       StarterKit.configure({
         undoRedo: false,
@@ -469,7 +472,11 @@ function EditorBody({ workspace, id, doc }: { workspace: Workspace; id: string; 
     onSelectionUpdate: () => setTick((t) => t + 1),
     onTransaction: () => setTick((t) => t + 1),
   });
+  useEffect(() => {
+    editor?.setEditable(editable);
+  }, [editor, editable]);
   async function addFiles(files: File[]) {
+    if (!workspace.canEdit(id)) return;
     for (const file of files) {
       try {
         const src = await storeImage(file, workspace.userId);
@@ -498,88 +505,91 @@ function EditorBody({ workspace, id, doc }: { workspace: Workspace; id: string; 
   );
   return (
     <>
-      <div className="toolbar" data-selection={tick} role="toolbar" aria-label="Форматирование">
-        {button(
-          'Жирный',
-          Bold,
-          () => editor.chain().focus().toggleBold().run(),
-          editor.isActive('bold'),
-        )}
-        {button(
-          'Курсив',
-          Italic,
-          () => editor.chain().focus().toggleItalic().run(),
-          editor.isActive('italic'),
-        )}
-        {button(
-          'Зачёркнутый',
-          Strikethrough,
-          () => editor.chain().focus().toggleStrike().run(),
-          editor.isActive('strike'),
-        )}
-        {button(
-          'Скрытый текст',
-          EyeOff,
-          () => editor.chain().focus().toggleMark('spoiler').run(),
-          editor.isActive('spoiler'),
-        )}
-        <span className="toolbar-divider" />
-        {button(
-          'Заголовок 2',
-          Heading2,
-          () => editor.chain().focus().toggleHeading({ level: 2 }).run(),
-          editor.isActive('heading', { level: 2 }),
-        )}
-        {button(
-          'Заголовок 3',
-          Heading3,
-          () => editor.chain().focus().toggleHeading({ level: 3 }).run(),
-          editor.isActive('heading', { level: 3 }),
-        )}
-        {button(
-          'Маркированный список',
-          List,
-          () => editor.chain().focus().toggleBulletList().run(),
-          editor.isActive('bulletList'),
-        )}
-        {button(
-          'Нумерованный список',
-          ListOrdered,
-          () => editor.chain().focus().toggleOrderedList().run(),
-          editor.isActive('orderedList'),
-        )}
-        {button(
-          'Список задач',
-          ListTodo,
-          () => editor.chain().focus().toggleTaskList().run(),
-          editor.isActive('taskList'),
-        )}
-        <span className="toolbar-divider" />
-        {button(
-          'Ссылка',
-          Link,
-          () => setLink(editor.getAttributes('link').href || ''),
-          editor.isActive('link'),
-        )}
-        {button('Вставить изображение', ImagePlus, () => imageInput.current?.click())}
-        <input
-          ref={imageInput}
-          hidden
-          aria-label="Файл изображения"
-          type="file"
-          accept="image/*"
-          multiple
-          onChange={(e) => {
-            void addFiles([...(e.target.files || [])]);
-            e.target.value = '';
-          }}
-        />
-        {button('Отменить', Undo2, () => editor.chain().focus().undo().run())}
-        {button('Повторить', Redo2, () => editor.chain().focus().redo().run())}
-      </div>
+      {editable && (
+        <div className="toolbar" data-selection={tick} role="toolbar" aria-label="Форматирование">
+          {button(
+            'Жирный',
+            Bold,
+            () => editor.chain().focus().toggleBold().run(),
+            editor.isActive('bold'),
+          )}
+          {button(
+            'Курсив',
+            Italic,
+            () => editor.chain().focus().toggleItalic().run(),
+            editor.isActive('italic'),
+          )}
+          {button(
+            'Зачёркнутый',
+            Strikethrough,
+            () => editor.chain().focus().toggleStrike().run(),
+            editor.isActive('strike'),
+          )}
+          {button(
+            'Скрытый текст',
+            EyeOff,
+            () => editor.chain().focus().toggleMark('spoiler').run(),
+            editor.isActive('spoiler'),
+          )}
+          <span className="toolbar-divider" />
+          {button(
+            'Заголовок 2',
+            Heading2,
+            () => editor.chain().focus().toggleHeading({ level: 2 }).run(),
+            editor.isActive('heading', { level: 2 }),
+          )}
+          {button(
+            'Заголовок 3',
+            Heading3,
+            () => editor.chain().focus().toggleHeading({ level: 3 }).run(),
+            editor.isActive('heading', { level: 3 }),
+          )}
+          {button(
+            'Маркированный список',
+            List,
+            () => editor.chain().focus().toggleBulletList().run(),
+            editor.isActive('bulletList'),
+          )}
+          {button(
+            'Нумерованный список',
+            ListOrdered,
+            () => editor.chain().focus().toggleOrderedList().run(),
+            editor.isActive('orderedList'),
+          )}
+          {button(
+            'Список задач',
+            ListTodo,
+            () => editor.chain().focus().toggleTaskList().run(),
+            editor.isActive('taskList'),
+          )}
+          <span className="toolbar-divider" />
+          {button(
+            'Ссылка',
+            Link,
+            () => setLink(editor.getAttributes('link').href || ''),
+            editor.isActive('link'),
+          )}
+          {button('Вставить изображение', ImagePlus, () => imageInput.current?.click())}
+          <input
+            ref={imageInput}
+            hidden
+            aria-label="Файл изображения"
+            type="file"
+            accept="image/*"
+            multiple
+            onChange={(e) => {
+              void addFiles([...(e.target.files || [])]);
+              e.target.value = '';
+            }}
+          />
+          {button('Отменить', Undo2, () => editor.chain().focus().undo().run())}
+          {button('Повторить', Redo2, () => editor.chain().focus().redo().run())}
+        </div>
+      )}
       <div className="document">
         <input
           className="note-title"
+          readOnly={!editable}
           aria-label="Название заметки"
           placeholder="Без названия"
           value={hiddenTitle ? secureTitle(doc) : workspace.metadata.get(id)?.title || ''}
@@ -592,7 +602,7 @@ function EditorBody({ workspace, id, doc }: { workspace: Workspace; id: string; 
           }}
         />
         <EditorContent editor={editor} />
-        <p className="editor-hint">Напишите что-нибудь или начните список с «[ ]»</p>
+        {editable && <p className="editor-hint">Напишите что-нибудь или начните список с «[ ]»</p>}
       </div>
       {link !== null && (
         <div className="modal-backdrop">
