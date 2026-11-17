@@ -18,7 +18,13 @@ export interface Envelope {
 /** Рекомендация OWASP для PBKDF2-SHA-256 (2023+). */
 export const KDF_ITERATIONS = 600_000;
 
-const subtle = () => globalThis.crypto.subtle;
+const subtle = () => {
+  if (!globalThis.crypto?.subtle)
+    throw new Error(
+      'Шифрование недоступно: откройте SelfNote по HTTPS. По обычному HTTP на адресе сервера браузер не разрешает работу с паролями. Для локальной разработки используйте localhost.',
+    );
+  return globalThis.crypto.subtle;
+};
 const bytes = (value: Uint8Array): ArrayBuffer => new Uint8Array(value).buffer as ArrayBuffer;
 
 export function toBase64(data: Uint8Array): string {

@@ -1828,9 +1828,12 @@ small,
   --switch-shadow: 0 1px 3px rgb(0 0 0 / 20%);
 }
 .switch-control,
+.modal .switch-control,
+.settings-page .switch-control,
 .note-menu .switch-control {
   position: relative;
   display: inline-flex;
+  flex-direction: row;
   align-items: center;
   gap: 12px;
   min-height: 44px;
@@ -2637,4 +2640,115 @@ small,
 }
 .note-presence {
   color: var(--accent-text);
+}
+
+/* Тип заметки «Пароли». */
+.new-note-split {
+  display: flex;
+  margin-bottom: 18px;
+  position: relative;
+  gap: 4px;
+}
+.new-note-split > button {
+  flex: 1;
+}
+.create-menu summary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 44px;
+  border-radius: 12px;
+  background: var(--accent);
+  color: var(--on-accent);
+  cursor: pointer;
+  list-style: none;
+}
+.create-menu summary::-webkit-details-marker {
+  display: none;
+}
+.create-options {
+  position: absolute;
+  top: 48px;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 6px;
+  box-shadow: var(--shadow);
+}
+.create-options button {
+  width: 100%;
+  justify-content: flex-start;
+}
+.password-editor {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 28px;
+}
+.password-editor label,
+.vault-gate label {
+  display: block;
+  margin: 12px 0;
+}
+.password-editor input,
+.vault-gate input {
+  margin-top: 6px;
+}
+.password-heading,
+.password-heading > span {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+.credential {
+  min-width: 0;
+  margin: 24px 0;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--soft);
+}
+.credential-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.credential-field input {
+  flex: 1;
+}
+.credential-field button {
+  flex: none;
+  padding: 8px;
+}
+.credential-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.password-history > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.vault-gate {
+  max-width: 520px;
+  margin: auto;
+}
+@media (max-width: 760px) {
+  .password-editor {
+    padding: 16px;
+  }
+  .credential {
+    padding: 12px;
+  }
+}
+
+.clear-trash {
+  margin: 0 16px 4px;
+  flex-shrink: 0;
 }

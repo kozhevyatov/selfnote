@@ -1,3 +1,4 @@
+import { NewNoteButton, PasswordEditor } from './Passwords';
 import { MembersDialog, Invitations, NotePresence } from './Collaboration';
 import { ColorPicker } from './ColorPicker';
 import { NotebookIcon, NotebookIconPicker } from './NotebookIcon';
@@ -7,6 +8,8 @@ import { uuid } from './ids';
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
   FileText,
+  Feather,
+  KeyRound,
   Plus,
   Search,
   CheckSquare,
@@ -333,15 +336,17 @@ function WorkspaceShell({
       searchOptions: { prefix: true, fuzzy: 0.2 },
     });
     search.addAll(
-      [...workspace.metadata.values()].map((n) => ({
-        id: n.id,
-        title:
-          n.encrypted && n.hideTitle && !workspace.secure.isUnlocked(n.id)
-            ? ''
-            : workspace.title(n),
-        text: workspace.extract(n.id).plainText,
-        tags: n.tags.join(' '),
-      })),
+      [...workspace.metadata.values()]
+        .filter((n) => n.kind !== 'passwords' || workspace.secure.isUnlocked(n.id))
+        .map((n) => ({
+          id: n.id,
+          title:
+            n.encrypted && n.hideTitle && !workspace.secure.isUnlocked(n.id)
+              ? ''
+              : workspace.title(n),
+          text: workspace.extract(n.id).plainText,
+          tags: n.tags.join(' '),
+        })),
     );
     return search;
   }, [workspace, revision, searching]);
@@ -357,6 +362,7 @@ function WorkspaceShell({
       (n) =>
         ['all', 'trash'].includes(ui.filter) ||
         (ui.filter === 'tasks' && workspace.extract(n.id).tasks.length > 0) ||
+        (ui.filter === 'passwords' && n.kind === 'passwords') ||
         (ui.filter === 'favorites' && Boolean(n.favorite)) ||
         (ui.filter === 'shared' && (sharedIds.has(n.id) || workspace.isCollaborative(n.id))) ||
         ui.filter === n.notebookId ||
@@ -366,19 +372,21 @@ function WorkspaceShell({
   const currentNotebook = workspace.notebooks.get(ui.filter);
   const currentSection = workspace.sections.get(ui.filter);
   const title =
-    ui.filter === 'all'
-      ? 'Все заметки'
-      : ui.filter === 'tasks'
-        ? 'Задачи'
-        : ui.filter === 'favorites'
-          ? 'Избранное'
-          : ui.filter === 'shared'
-            ? 'Общие'
-            : ui.filter === 'trash'
-              ? 'Корзина'
-              : ui.filter.startsWith('tag:')
-                ? '#' + ui.filter.slice(4)
-                : currentNotebook?.name || currentSection?.name || 'Все заметки';
+    ui.filter === 'passwords'
+      ? 'Пароли'
+      : ui.filter === 'all'
+        ? 'Все заметки'
+        : ui.filter === 'tasks'
+          ? 'Задачи'
+          : ui.filter === 'favorites'
+            ? 'Избранное'
+            : ui.filter === 'shared'
+              ? 'Общие'
+              : ui.filter === 'trash'
+                ? 'Корзина'
+                : ui.filter.startsWith('tag:')
+                  ? '#' + ui.filter.slice(4)
+                  : currentNotebook?.name || currentSection?.name || 'Все заметки';
   // Группы как в макете: Закреплённые, Сегодня, Вчера, На этой неделе, затем месяцы.
   const groups = new Map<string, Note[]>();
   const captions = new Map<string, string>();
@@ -566,7 +574,7 @@ function WorkspaceShell({
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-icon">
-            <FileText size={19} />
+            <Feather size={19} />
           </span>
           <strong>SelfNote</strong>
           <button
@@ -577,10 +585,7 @@ function WorkspaceShell({
             <X size={18} />
           </button>
         </div>
-        <button className="primary new-note" onClick={() => workspace.createNote()}>
-          <Plus size={18} />
-          Новая заметка
-        </button>
+        <NewNoteButton workspace={workspace} />
         <div className="nav-scroll">
           <nav>
             {nav('all', 'Все заметки', FileText, notes.filter((n) => !n.deletedAt).length)}
@@ -589,6 +594,12 @@ function WorkspaceShell({
               'Задачи',
               CheckSquare,
               todayTasks.length ? `${todayTasks.length} сегодня` : undefined,
+            )}
+            {nav(
+              'passwords',
+              'Пароли',
+              KeyRound,
+              notes.filter((n) => !n.deletedAt && n.kind === 'passwords').length || undefined,
             )}
             {nav(
               'favorites',
@@ -713,7 +724,9 @@ function WorkspaceShell({
               </button>
             ))}
             {!workspace.tags.size && (
-              <button className="add-tag" onClick={addTag}>+ Добавить метку</button>
+              <button className="add-tag" onClick={addTag}>
+                + Добавить метку
+              </button>
             )}
           </div>
         </div>
@@ -758,13 +771,17 @@ function WorkspaceShell({
                 )}
                 <h1>{title}</h1>
               </div>
-              <button
-                className="icon-button soft"
-                aria-label="Новая заметка"
-                onClick={() => workspace.createNote()}
-              >
-                <NotebookPen size={19} />
-              </button>
+              {ui.filter === 'passwords' ? (
+                <NewNoteButton workspace={workspace} passwordsOnly />
+              ) : (
+                <button
+                  className="icon-button soft"
+                  aria-label="Новая заметка"
+                  onClick={() => workspace.createNote()}
+                >
+                  <NotebookPen size={19} />
+                </button>
+              )}
             </div>
             <label className="search">
               <Search size={17} />
@@ -790,7 +807,7 @@ function WorkspaceShell({
           </header>
           {ui.filter === 'trash' && (
             <button
-              className="danger-text"
+              className="danger-text clear-trash"
               disabled={!notes.some((n) => n.deletedAt)}
               onClick={() => {
                 if (window.confirm('Очистить корзину? Все заметки в ней будут удалены навсегда.'))
@@ -835,7 +852,11 @@ function WorkspaceShell({
                   >
                     <span className="note-row-top">
                       <strong>
-                        {note.encrypted && <Lock size={13} aria-label="Под паролем" />}
+                        {note.kind === 'passwords' ? (
+                          <KeyRound size={13} aria-label="Пароли" />
+                        ) : (
+                          note.encrypted && <Lock size={13} aria-label="Под паролем" />
+                        )}
                         {workspace.title(note)}
                       </strong>
                       <time>
@@ -880,20 +901,30 @@ function WorkspaceShell({
                 <h3>
                   {ui.query
                     ? 'Ничего не найдено'
-                    : ui.filter === 'trash'
-                      ? 'Корзина пуста'
-                      : ui.filter === 'tasks'
-                        ? 'Заметок с задачами пока нет'
-                        : 'Здесь будут ваши заметки'}
+                    : ui.filter === 'passwords'
+                      ? 'Здесь будут ваши пароли'
+                      : ui.filter === 'trash'
+                        ? 'Корзина пуста'
+                        : ui.filter === 'tasks'
+                          ? 'Заметок с задачами пока нет'
+                          : 'Здесь будут ваши заметки'}
                 </h3>
                 <p>
-                  {ui.query ? 'Попробуйте другие слова.' : 'Начните с мысли, плана или списка дел.'}
+                  {ui.query
+                    ? 'Попробуйте другие слова.'
+                    : ui.filter === 'passwords'
+                      ? 'Создайте зашифрованную заметку с одним или несколькими аккаунтами.'
+                      : 'Начните с мысли, плана или списка дел.'}
                 </p>
-                {ui.filter !== 'trash' && (
-                  <button onClick={() => workspace.createNote()}>
-                    <Plus size={16} />
-                    Новая заметка
-                  </button>
+                {ui.filter === 'passwords' ? (
+                  <NewNoteButton workspace={workspace} passwordsOnly />
+                ) : (
+                  ui.filter !== 'trash' && (
+                    <button onClick={() => workspace.createNote()}>
+                      <Plus size={16} />
+                      Новая заметка
+                    </button>
+                  )
                 )}
               </div>
             )}
@@ -982,7 +1013,11 @@ function WorkspaceShell({
                       className="icon-button active"
                       title="Заблокировать заметку"
                       aria-label="Заблокировать заметку"
-                      onClick={() => workspace.secure.lock(selected.id)}
+                      onClick={() =>
+                        selected.kind === 'passwords'
+                          ? workspace.vault.lock()
+                          : workspace.secure.lock(selected.id)
+                      }
                     >
                       <LockOpen size={18} />
                     </button>
@@ -1002,8 +1037,12 @@ function WorkspaceShell({
                   className="icon-button"
                   title="Поделиться"
                   aria-label="Поделиться"
-                  disabled={Boolean(selected.deletedAt) || !workspace.isOwner(selected.id)}
-                  onClick={() => setSharing(true)}
+                  disabled={
+                    selected.kind === 'passwords' ||
+                    Boolean(selected.deletedAt) ||
+                    !workspace.isOwner(selected.id)
+                  }
+                  onClick={() => selected.kind !== 'passwords' && setSharing(true)}
                 >
                   <Share2 size={18} />
                 </button>
@@ -1118,28 +1157,30 @@ function WorkspaceShell({
                         <Tag size={16} />
                         Новая метка
                       </button>
-                      {selected.encrypted && workspace.secure.isUnlocked(selected.id) && (
-                        <>
-                          <button
-                            onClick={() => {
-                              setPassword('change');
-                              setMore(false);
-                            }}
-                          >
-                            <Lock size={16} />
-                            Сменить пароль
-                          </button>
-                          <button
-                            onClick={() => {
-                              setPassword('remove');
-                              setMore(false);
-                            }}
-                          >
-                            <LockOpen size={16} />
-                            Снять пароль
-                          </button>
-                        </>
-                      )}
+                      {selected.kind !== 'passwords' &&
+                        selected.encrypted &&
+                        workspace.secure.isUnlocked(selected.id) && (
+                          <>
+                            <button
+                              onClick={() => {
+                                setPassword('change');
+                                setMore(false);
+                              }}
+                            >
+                              <Lock size={16} />
+                              Сменить пароль
+                            </button>
+                            <button
+                              onClick={() => {
+                                setPassword('remove');
+                                setMore(false);
+                              }}
+                            >
+                              <LockOpen size={16} />
+                              Снять пароль
+                            </button>
+                          </>
+                        )}
                       {selected.deletedAt ? (
                         <button
                           onClick={() => {
@@ -1251,7 +1292,11 @@ function WorkspaceShell({
               />
             )}
             <div className="editor-scroll">
-              <NoteEditor key={selected.id} workspace={workspace} id={selected.id} />
+              {selected.kind === 'passwords' ? (
+                <PasswordEditor key={selected.id} workspace={workspace} id={selected.id} />
+              ) : (
+                <NoteEditor key={selected.id} workspace={workspace} id={selected.id} />
+              )}
             </div>
             <footer className="editor-footer">
               <Check size={14} />
@@ -1699,6 +1744,7 @@ function Preview({
   query: string;
   remote?: SnippetPart[] | null;
 }) {
+  if (note.kind === 'passwords') return <>Зашифрованные пароли</>;
   if (note.encrypted && !workspace.secure.isUnlocked(note.id)) return <>Содержимое зашифровано</>;
   const text = workspace.extract(note.id).plainText;
   const parts = query ? (snippet(text, query) ?? remote ?? null) : null;

@@ -79,6 +79,7 @@ export class SecureNotes {
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
   private pushing = new Set<string>();
   private pendingCount = 0;
+  private saves = new Map<string, Promise<void>>();
   constructor(private readonly workspace: Workspace) {}
 
   private recordKey(id: string) {
@@ -94,7 +95,7 @@ export class SecureNotes {
     await withStore('readwrite', (s) => s.delete(this.recordKey(id)));
   }
   get pending() {
-    return this.pendingCount > 0 || this.timers.size > 0;
+    return this.pendingCount > 0 || this.timers.size > 0 || this.saves.size > 0;
   }
   /** Открытые (расшифрованные) документы — для загрузки картинок. */
   docs(): Y.Doc[] {
@@ -120,13 +121,49 @@ export class SecureNotes {
     this.attach(id, key, envelope.kdf, state);
     if (record.dirty) void this.push(id);
   }
+  async unlockWithKey(id: string, key: Uint8Array) {
+    let record = await this.record(id);
+    if (!record) record = await this.download(id);
+    if (!record) throw new Error('Сначала загрузите заметку при подключении к сети');
+    const envelope = parseEnvelope(record.payload);
+    this.attach(id, key, envelope.kdf, await unseal(key, envelope));
+    if (record.dirty) void this.push(id);
+  }
+  async createPasswordNote(
+    key: Uint8Array,
+    kdf: Kdf,
+    notebookId: string | null,
+    sectionId: string | null,
+  ) {
+    const id = uuid();
+    const doc = new Y.Doc();
+    doc.getMap('secure').set('title', '');
+    doc.getArray('credentials').push([{ id: uuid(), name: '', url: '', login: '', password: '' }]);
+    const state = Y.encodeStateAsUpdate(doc);
+    doc.destroy();
+    const payload = JSON.stringify(await seal(key, kdf, state));
+    await this.store(id, { version: 0, payload, dirty: true });
+    this.workspace.addEncryptedNote(id, {
+      title: '',
+      hideTitle: true,
+      kind: 'passwords',
+      notebookId,
+      sectionId,
+    });
+    this.attach(id, key, kdf, state);
+    void this.push(id);
+    return id;
+  }
   private attach(id: string, key: Uint8Array, kdf: Kdf, state: Uint8Array) {
     this.open.get(id)?.doc.destroy();
     const doc = new Y.Doc();
     Y.applyUpdate(doc, state, REMOTE);
     doc.on('update', (_update: Uint8Array, origin: unknown) => {
       this.workspace.forgetExtracted(id);
-      if (origin !== REMOTE) this.schedule(id);
+      if (origin !== REMOTE) {
+        this.schedule(id);
+        if (this.workspace.metadata.get(id)?.kind === 'passwords') this.workspace.update(id, {});
+      }
       this.workspace.emit();
     });
     this.open.set(id, { key, kdf, doc });
@@ -153,17 +190,33 @@ export class SecureNotes {
     );
   }
   /** Зашифровать текущее состояние, сохранить на устройстве и отправить. */
-  async save(id: string) {
+  save(id: string): Promise<void> {
     clearTimeout(this.timers.get(id));
     this.timers.delete(id);
     const entry = this.open.get(id);
-    if (!entry) return;
-    const payload = JSON.stringify(
-      await seal(entry.key, entry.kdf, Y.encodeStateAsUpdate(entry.doc)),
-    );
-    const record = await this.record(id);
-    await this.store(id, { version: record?.version ?? 0, payload, dirty: true });
-    await this.push(id);
+    if (!entry) return Promise.resolve();
+    // Снимок снимается до блокировки; запись в IndexedDB упорядочена, чтобы
+    // более медленное шифрование старой версии не затёрло новую.
+    const state = Y.encodeStateAsUpdate(entry.doc);
+    const { key, kdf } = entry;
+    const previous = this.saves.get(id) ?? Promise.resolve();
+    const saving = previous
+      .catch(() => {})
+      .then(async () => {
+        const payload = JSON.stringify(await seal(key, kdf, state));
+        const record = await this.record(id);
+        await this.store(id, { version: record?.version ?? 0, payload, dirty: true });
+      });
+    this.saves.set(id, saving);
+    return saving
+      .then(async () => {
+        if (this.saves.get(id) === saving) this.saves.delete(id);
+        await this.push(id);
+      })
+      .catch((error) => {
+        this.workspace.toast('Не удалось сохранить зашифрованные изменения на устройстве');
+        throw error;
+      });
   }
   async push(id: string) {
     if (!navigator.onLine || this.pushing.has(id)) return;
@@ -223,6 +276,17 @@ export class SecureNotes {
     try {
       const server = parseEnvelope(conflict.payload);
       const state = await unseal(entry.key, server);
+      if (this.workspace.metadata.get(id)?.kind === 'passwords') {
+        await this.conflictCopy(id, entry);
+        if (this.open.get(id) === entry) this.attach(id, entry.key, server.kdf, state);
+        await this.store(id, {
+          version: conflict.version,
+          payload: conflict.payload!,
+          dirty: false,
+        });
+        this.workspace.toast('Конфликт паролей: ваши изменения сохранены отдельной копией.');
+        return;
+      }
       Y.applyUpdate(entry.doc, state, REMOTE);
       const payload = JSON.stringify(
         await seal(entry.key, entry.kdf, Y.encodeStateAsUpdate(entry.doc)),
@@ -252,6 +316,7 @@ export class SecureNotes {
     this.workspace.addEncryptedNote(copy, {
       title: meta?.hideTitle ? '' : title,
       hideTitle: Boolean(meta?.hideTitle),
+      kind: meta?.kind,
       notebookId: meta?.notebookId ?? null,
       sectionId: meta?.sectionId ?? null,
     });
@@ -331,6 +396,8 @@ export class SecureNotes {
     this.attach(id, key, kdf, state);
   }
   async changePassword(id: string, password: string) {
+    if (this.workspace.metadata.get(id)?.kind === 'passwords')
+      throw new Error('Используется общий мастер-пароль');
     const entry = this.open.get(id);
     if (!entry) throw new Error('Сначала откройте заметку');
     entry.kdf = newKdf();
@@ -339,6 +406,8 @@ export class SecureNotes {
   }
   /** Снять пароль: заметка снова синхронизируется обычным образом. */
   async disable(id: string) {
+    if (this.workspace.metadata.get(id)?.kind === 'passwords')
+      throw new Error('Пароли всегда зашифрованы');
     if (!navigator.onLine) throw new Error('Чтобы снять пароль, нужно подключение к серверу');
     const entry = this.open.get(id);
     if (!entry) throw new Error('Сначала откройте заметку');

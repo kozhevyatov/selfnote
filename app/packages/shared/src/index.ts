@@ -29,6 +29,7 @@ export interface Section {
   name: string;
 }
 export interface Note {
+  kind?: 'passwords';
   id: string;
   title: string;
   notebookId: string | null;

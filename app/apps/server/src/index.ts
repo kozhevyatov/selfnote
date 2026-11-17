@@ -1473,6 +1473,38 @@ app.get('/api/search', async (request) => {
 // ===== Заметки под паролем =====
 // Сервер хранит непрозрачный зашифрованный снапшот с номером версии. Запись — только
 // поверх известной клиенту версии; иначе 409 с актуальной копией (клиент сливает правки).
+// Конверт случайного ключа хранилища. Создание сериализовано: два устройства
+// не могут независимо установить разные мастер-пароли.
+app.get('/api/vault', async (request) => {
+  const owner = await userId(request);
+  const row = await database()
+    .selectFrom('settings')
+    .select('value')
+    .where('key', '=', `vault:${owner}`)
+    .executeTakeFirst();
+  return { payload: row?.value ?? null };
+});
+app.post('/api/vault', async (request, reply) => {
+  const owner = await userId(request);
+  const { payload } = z.object({ payload: z.string().min(10).max(10000) }).parse(request.body);
+  const envelope = JSON.parse(payload);
+  if (envelope?.v !== 1 || typeof envelope.data !== 'string')
+    return reply.code(400).send({ message: 'Ожидаются зашифрованные данные' });
+  return serializeDocuments(async () => {
+    const key = `vault:${owner}`;
+    const existing = await database()
+      .selectFrom('settings')
+      .select('key')
+      .where('key', '=', key)
+      .executeTakeFirst();
+    if (existing)
+      return reply
+        .code(409)
+        .send({ message: 'Мастер-пароль уже настроен. Откройте хранилище заново.' });
+    await database().insertInto('settings').values({ key, value: payload }).execute();
+    return { ok: true };
+  });
+});
 app.get('/api/encrypted', async (request) => {
   const owner = await userId(request);
   return database()
@@ -1589,6 +1621,8 @@ app.put('/api/encrypted/:id', { bodyLimit: 32 * 1024 * 1024 }, async (request, r
 app.delete('/api/encrypted/:id', async (request, reply) => {
   const owner = await userId(request);
   const id = z.uuid().parse((request.params as { id: string }).id);
+  if ((await spaceNote(owner, id))?.kind === 'passwords')
+    return reply.code(403).send({ message: 'Пароли всегда остаются зашифрованными' });
   return serializeDocuments(async () => {
     const row = await encryptedRow(id);
     if (!row || row.owner_id !== owner)
@@ -1970,6 +2004,8 @@ app.post('/api/notes/:id/shares', async (request, reply) => {
       expiresAt: z.iso.datetime({ offset: true }).nullish(),
     })
     .parse(request.body);
+  if ((await spaceNote(owner, id))?.kind === 'passwords')
+    return reply.code(403).send({ message: 'Пароли нельзя публиковать' });
   const kind = await ownedNoteKind(id, owner);
   if (!kind) return reply.code(404).send({ message: 'Дождитесь синхронизации заметки с сервером' });
   if (input.expiresAt && Date.parse(input.expiresAt) <= Date.now())
@@ -2010,7 +2046,7 @@ async function findShare(token: string) {
     .executeTakeFirst();
   if (!share || (share.expires_at && Date.parse(share.expires_at) <= Date.now())) return null;
   const meta = await spaceNote(share.owner_id, share.note_id);
-  if (!meta || meta.deletedAt) return null;
+  if (!meta || meta.deletedAt || meta.kind === 'passwords') return null;
   const encrypted = await encryptedRow(share.note_id);
   // заметку закрыли паролем или сняли пароль после создания ссылки — ссылка устарела
   if (Boolean(encrypted) !== Boolean(share.encrypted)) return null;

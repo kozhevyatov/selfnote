@@ -41,12 +41,17 @@ function notesFor(workspace: Workspace, notebookId?: string | null) {
     .filter(
       (n) =>
         !n.deletedAt &&
+        n.kind !== 'passwords' &&
         (notebookId === undefined || n.notebookId === notebookId) &&
         (!n.encrypted || workspace.secure.isUnlocked(n.id)),
     )
     .map((n) => (n.encrypted && n.hideTitle ? { ...n, title: workspace.title(n) } : n));
 }
 function lockedWarning(workspace: Workspace, warnings: string[]) {
+  if ([...workspace.metadata.values()].some((n) => !n.deletedAt && n.kind === 'passwords'))
+    warnings.push(
+      'Заметки «Пароли» пропущены. Они сохраняются только в зашифрованном резервном бэкапе сервера.',
+    );
   const locked = [...workspace.metadata.values()].filter(
     (n) => !n.deletedAt && n.encrypted && !workspace.secure.isUnlocked(n.id),
   ).length;

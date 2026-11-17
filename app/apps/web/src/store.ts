@@ -1,3 +1,4 @@
+import { PasswordVault } from './vault';
 import * as Y from 'yjs';
 import { IndexeddbPersistence } from 'y-indexeddb';
 import { HocuspocusProvider, HocuspocusProviderWebsocket } from '@hocuspocus/provider';
@@ -73,6 +74,7 @@ export class Workspace {
   /** Документы, к которым сервер не пустил (удалены, под паролем и т. п.). */
   private failed = new Set<string>();
   readonly secure: SecureNotes;
+  readonly vault: PasswordVault;
   collaboration: CollaborationList = { notes: [], owned: [] };
   private collaborationTimer: ReturnType<typeof setInterval>;
   private loadingCollaboration = false;
@@ -141,6 +143,7 @@ export class Workspace {
       url: `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/collab`,
     });
     this.space = this.create(`space:${userId}`);
+    this.vault = new PasswordVault(this);
     this.space.doc.on('update', () => {
       this.notesCache = null;
       this.loadNotes();
@@ -325,7 +328,11 @@ export class Workspace {
   title(note: Note) {
     if (note.encrypted && note.hideTitle) {
       const doc = this.secure.doc(note.id);
-      return doc ? secureTitle(doc) || 'Без названия' : 'Заметка под паролем';
+      return doc
+        ? secureTitle(doc) || 'Без названия'
+        : note.kind === 'passwords'
+          ? 'Пароли'
+          : 'Заметка под паролем';
     }
     return note.title || 'Без названия';
   }
@@ -349,6 +356,7 @@ export class Workspace {
   }
   /** Текст и задачи заметки; пересчитываются только после изменения этой заметки. */
   extract(id: string): Extracted {
+    if (this.metadata.get(id)?.kind === 'passwords') return { plainText: '', tasks: [] };
     let value = this.extracted.get(id);
     if (!value) {
       const doc = this.noteDoc(id);
@@ -392,7 +400,10 @@ export class Workspace {
   /** Метаданные новой заметки под паролем (содержимое уже лежит в SecureNotes). */
   addEncryptedNote(
     id: string,
-    meta: Pick<Note, 'title' | 'notebookId' | 'sectionId'> & { hideTitle: boolean },
+    meta: Pick<Note, 'title' | 'notebookId' | 'sectionId'> & {
+      hideTitle: boolean;
+      kind?: 'passwords';
+    },
   ) {
     const fields = new Y.Map<unknown>();
     for (const [key, value] of Object.entries({
@@ -406,6 +417,7 @@ export class Workspace {
       deletedAt: null,
       encrypted: true,
       hideTitle: meta.hideTitle,
+      ...(meta.kind ? { kind: meta.kind } : {}),
       color: null,
     } satisfies Note))
       fields.set(key, value);
@@ -619,6 +631,7 @@ export class Workspace {
   }
   destroy() {
     this.stopped = true;
+    this.vault.destroy();
     this.secure.destroy();
     clearInterval(this.timer);
     clearInterval(this.collaborationTimer);
