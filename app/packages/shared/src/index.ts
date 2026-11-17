@@ -10,6 +10,7 @@ export interface Notebook {
   id: string;
   name: string;
   color: string;
+  icon?: string;
 }
 export interface Section {
   id: string;

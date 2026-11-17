@@ -22,6 +22,7 @@ export interface ImportNote {
   book: string | null;
   section: string | null;
   bookColor?: string;
+  bookIcon?: string;
   updatedAt?: string;
   pinned?: boolean;
   source: string;
@@ -298,7 +299,7 @@ async function planMarkdown(
 interface SelfnoteExport {
   format: string;
   version: number;
-  notebooks: { id: string; name: string; color: string }[];
+  notebooks: { id: string; name: string; color: string; icon?: string }[];
   sections: { id: string; notebookId: string; name: string }[];
   tags: string[];
   notes: {
@@ -349,6 +350,7 @@ async function planSelfnote(fileName: string, entries: ZipEntry[]): Promise<Impo
       tags: note.tags ?? [],
       book: book?.name ?? null,
       bookColor: book?.color,
+      bookIcon: typeof book?.icon === 'string' ? book.icon : undefined,
       section: note.sectionId ? (sections.get(note.sectionId)?.name ?? null) : null,
       pinned: note.pinned,
       updatedAt: note.updatedAt,
@@ -391,7 +393,7 @@ export async function applyImport(
   const sections = new Map<string, string>();
   for (const s of workspace.sections.values())
     sections.set(`${s.notebookId}/${s.name.toLowerCase()}`, s.id);
-  const bookId = (name: string, color?: string) => {
+  const bookId = (name: string, color?: string, icon?: string) => {
     const key = name.toLowerCase();
     let id = books.get(key);
     if (!id) {
@@ -400,6 +402,7 @@ export async function applyImport(
         id,
         name,
         color: color ?? PALETTE[workspace.notebooks.size % PALETTE.length],
+        ...(icon ? { icon } : {}),
       });
       books.set(key, id);
       report.books++;
@@ -472,7 +475,7 @@ export async function applyImport(
             (c) => c.type !== 'image' || String(c.attrs?.src ?? '').startsWith('local-image:'),
           );
       });
-      const notebookId = note.book ? bookId(note.book, note.bookColor) : null;
+      const notebookId = note.book ? bookId(note.book, note.bookColor, note.bookIcon) : null;
       const section = notebookId && note.section ? sectionId(notebookId, note.section) : null;
       for (const tag of note.tags) workspace.tags.set(tag, tag);
       workspace.addNote(

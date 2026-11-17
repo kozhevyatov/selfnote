@@ -1,4 +1,5 @@
 import { ColorPicker } from './ColorPicker';
+import { NotebookIcon, NotebookIconPicker } from './NotebookIcon';
 import { Switch } from './Switch';
 import { History } from './History';
 import { uuid } from './ids';
@@ -13,7 +14,6 @@ import {
   Settings2,
   ChevronRight,
   ChevronDown,
-  Book,
   Menu,
   X,
   Pin,
@@ -59,8 +59,9 @@ interface Dialog {
   label: string;
   danger?: boolean;
   confirm?: string;
-  action: (value: string, color: string) => void;
+  action: (value: string, color: string, icon: string) => void;
   color?: string;
+  icon?: string;
 }
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -423,13 +424,14 @@ function WorkspaceShell({
   );
   function editNotebook(book?: Notebook) {
     setDialog({
-      title: book ? 'Переименовать книжку' : 'Новая записная книжка',
+      title: book ? 'Настройки книжки' : 'Новая записная книжка',
       label: 'Название',
       value: book?.name || '',
       color: book?.color || colors[notebooks.length % colors.length],
-      action: (name, color) => {
+      icon: book?.icon || 'book',
+      action: (name, color, icon) => {
         const id = book?.id || uuid();
-        workspace.notebooks.set(id, { id, name, color });
+        workspace.notebooks.set(id, { ...book, id, name, color, icon });
         if (!book) ui.setFilter(id);
       },
     });
@@ -615,7 +617,7 @@ function WorkspaceShell({
                     className="book-icon"
                     style={{ color: book.color, background: `${book.color}12` }}
                   >
-                    <Book size={14} />
+                    <NotebookIcon name={book.icon} />
                   </span>
                   <span>{book.name}</span>
                   <small>
@@ -640,7 +642,7 @@ function WorkspaceShell({
                     <MoreHorizontal size={15} />
                   </summary>
                   <div className="popover">
-                    <button onClick={() => editNotebook(book)}>Переименовать</button>
+                    <button onClick={() => editNotebook(book)}>Настройки книжки</button>
                     <button onClick={() => editSection(book.id)}>Добавить подраздел</button>
                     <button className="danger-text" onClick={() => removeNotebook(book)}>
                       Удалить
@@ -908,7 +910,13 @@ function WorkspaceShell({
           <>
             <header className="editor-header">
               <div className="breadcrumb">
-                <Book size={14} />
+                <NotebookIcon
+                  name={
+                    selected.notebookId
+                      ? workspace.notebooks.get(selected.notebookId)?.icon
+                      : undefined
+                  }
+                />
                 <span>
                   {selected.notebookId
                     ? workspace.notebooks.get(selected.notebookId)?.name
@@ -1415,7 +1423,9 @@ function NoteMenu({
           {notebooks.map((book) => (
             <div key={book.id}>
               <button role="menuitem" onClick={act(() => onMove(note.id, book.id, null))}>
-                <Book size={15} style={{ color: book.color }} />
+                <span style={{ color: book.color }}>
+                  <NotebookIcon name={book.icon} size={15} />
+                </span>
                 {book.name}
               </button>
               {sections
@@ -1629,6 +1639,7 @@ function Preview({
 function EditDialog({ dialog, close }: { dialog: Dialog; close: () => void }) {
   const [value, setValue] = useState(dialog.value);
   const [color, setColor] = useState(dialog.color || colors[0]);
+  const [icon, setIcon] = useState(dialog.icon || 'book');
   return (
     <div className="modal-backdrop" onClick={close}>
       <form
@@ -1639,7 +1650,7 @@ function EditDialog({ dialog, close }: { dialog: Dialog; close: () => void }) {
         onClick={(e) => e.stopPropagation()}
         onSubmit={(e) => {
           e.preventDefault();
-          dialog.action(value.trim(), color);
+          dialog.action(value.trim(), color, icon);
           close();
         }}
       >
@@ -1675,6 +1686,7 @@ function EditDialog({ dialog, close }: { dialog: Dialog; close: () => void }) {
             <ColorPicker value={color} onChange={setColor} label="Выбрать другой цвет" />
           </div>
         )}
+        {dialog.icon !== undefined && <NotebookIconPicker value={icon} onChange={setIcon} />}
         <div className="actions">
           <button type="button" onClick={close}>
             Отмена
