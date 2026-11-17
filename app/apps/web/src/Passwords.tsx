@@ -1,5 +1,5 @@
 import { savePasswordVersion, type Credential, type PasswordSnapshot } from './vault';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import * as Y from 'yjs';
 import { ChevronDown, Copy, Eye, EyeOff, KeyRound, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { uuid } from './ids';
@@ -122,6 +122,23 @@ export function NewNoteButton({
 }) {
   const [gate, setGate] = useState(false);
   const [busy, setBusy] = useState(false);
+  const menu = useRef<HTMLDetailsElement>(null);
+  // Меню типа заметки закрывается кликом в любом месте вне его и по Escape.
+  useEffect(() => {
+    const outside = (e: PointerEvent) => {
+      const details = menu.current;
+      if (details?.open && !details.contains(e.target as Node)) details.open = false;
+    };
+    const escape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && menu.current?.open) menu.current.open = false;
+    };
+    document.addEventListener('pointerdown', outside);
+    document.addEventListener('keydown', escape);
+    return () => {
+      document.removeEventListener('pointerdown', outside);
+      document.removeEventListener('keydown', escape);
+    };
+  }, []);
   async function create() {
     setBusy(true);
     try {
@@ -149,7 +166,7 @@ export function NewNoteButton({
             <Plus size={18} />
             Новая заметка
           </button>
-          <details className="create-menu">
+          <details className="create-menu" ref={menu}>
             <summary aria-label="Выбрать тип заметки">
               <ChevronDown size={18} />
             </summary>
