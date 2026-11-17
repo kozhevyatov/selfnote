@@ -656,7 +656,8 @@ try {
     200,
   );
   assert.equal(
-    (await request(`/api/notes/${collabId}/membership/accept`, {}, invitedReader.accessToken)).status,
+    (await request(`/api/notes/${collabId}/membership/accept`, {}, invitedReader.accessToken))
+      .status,
     200,
   );
   const readerClient = connect(`note:${collabId}`, invitedReader.accessToken);
@@ -673,7 +674,10 @@ try {
   assert.ok(!extractDocument(co.doc).plainText.includes('Читатель не должен писать'));
   const coVersions = `/api/notes/${collabId}/versions`;
   const coState = Buffer.from(Y.encodeStateAsUpdate(editorClient.doc)).toString('base64');
-  assert.equal((await request(coVersions, { state: coState }, invitedReader.accessToken)).status, 403);
+  assert.equal(
+    (await request(coVersions, { state: coState }, invitedReader.accessToken)).status,
+    403,
+  );
   assert.equal((await request(coVersions, { state: coState }, other.accessToken)).status, 200);
   const cv = await (await request(coVersions, undefined, invitedReader.accessToken)).json();
   assert.ok(cv.some((v) => v.author === other.user.id));
@@ -730,7 +734,10 @@ try {
     () => co.doc.getXmlFragment('content').toString().includes(sharedAttachment.url),
     'картинка редактора синхронизирована',
   );
-  assert.equal((await request(sharedAttachment.url, undefined, invitedReader.accessToken)).status, 200);
+  assert.equal(
+    (await request(sharedAttachment.url, undefined, invitedReader.accessToken)).status,
+    200,
+  );
   assert.equal((await request(sharedAttachment.url, undefined, owner.accessToken)).status, 200);
   assert.equal(
     (await put(collabId, { version: 0, payload: envelope('нельзя'), attachments: [] })).status,
@@ -837,6 +844,106 @@ try {
       .status,
     200,
   );
+  // Приглашение в заметку человека без аккаунта: ссылка на регистрацию сразу даёт доступ.
+  r = await request(
+    membersUrl,
+    { email: 'newbie@example.test', role: 'reader' },
+    owner.accessToken,
+  );
+  assert.equal(r.status, 200);
+  const noteInvite = (await r.json()).invite;
+  assert.ok(noteInvite?.token);
+  assert.ok(
+    (
+      await (await request(`/api/notes/${collabId}/invites`, undefined, owner.accessToken)).json()
+    ).some((i) => i.id === noteInvite.id),
+  );
+  assert.equal(
+    (await request(`/api/notes/${collabId}/invites`, undefined, other.accessToken)).status,
+    403,
+  );
+  const inviteInfo = await (await request(`/api/invites/${noteInvite.token}`)).json();
+  assert.equal(inviteInfo.email, 'newbie@example.test');
+  assert.ok(inviteInfo.noteTitle);
+  r = await request('/api/auth/register', {
+    name: 'Новичок',
+    email: 'newbie@example.test',
+    password: 'newbie-password-2026',
+    invite: noteInvite.token,
+  });
+  assert.equal(r.status, 200);
+  const newbie = await r.json();
+  assert.ok(
+    (await (await request('/api/collaboration', undefined, newbie.accessToken)).json()).notes.some(
+      (n) => n.note.id === collabId && !n.pending && n.role === 'reader',
+    ),
+  );
+  assert.equal((await request(`/api/invites/${noteInvite.token}`)).status, 410);
+  // Режим «по приглашениям»: без ссылки нельзя, ссылки выдаёт администратор.
+  const setMode = (mode) =>
+    request('/api/admin/registration', { mode }, owner.accessToken, undefined, 'PUT');
+  assert.equal((await setMode('invite')).status, 200);
+  assert.equal((await (await request('/api/setup')).json()).registration, 'invite');
+  assert.equal(
+    (
+      await request('/api/auth/register', {
+        name: 'Без ссылки',
+        email: 'nolink@example.test',
+        password: 'nolink-password-2026',
+      })
+    ).status,
+    403,
+  );
+  assert.equal((await request('/api/admin/invites', {}, other.accessToken)).status, 403);
+  r = await request('/api/admin/invites', { email: '' }, owner.accessToken);
+  assert.equal(r.status, 200);
+  const adminInvite = await r.json();
+  assert.ok(
+    (await (await request('/api/admin/invites', undefined, owner.accessToken)).json()).some(
+      (i) => i.id === adminInvite.id,
+    ),
+  );
+  assert.equal((await setMode('closed')).status, 200);
+  assert.equal((await request(`/api/invites/${adminInvite.token}`)).status, 410);
+  assert.equal((await setMode('invite')).status, 200);
+  assert.equal((await request(`/api/invites/${adminInvite.token}`)).status, 200);
+  r = await request('/api/auth/register', {
+    name: 'По ссылке',
+    email: 'invited@example.test',
+    password: 'invited-password-2026',
+    invite: adminInvite.token,
+  });
+  assert.equal(r.status, 200);
+  assert.equal((await request(`/api/invites/${adminInvite.token}`)).status, 410);
+  r = await request('/api/admin/invites', { email: 'revoked@example.test' }, owner.accessToken);
+  const revokedInvite = await r.json();
+  assert.equal(
+    (
+      await request(
+        `/api/invites/${revokedInvite.id}`,
+        undefined,
+        other.accessToken,
+        undefined,
+        'DELETE',
+      )
+    ).status,
+    403,
+  );
+  assert.equal(
+    (
+      await request(
+        `/api/invites/${revokedInvite.id}`,
+        undefined,
+        owner.accessToken,
+        undefined,
+        'DELETE',
+      )
+    ).status,
+    200,
+  );
+  assert.equal((await request(`/api/invites/${revokedInvite.token}`)).status, 410);
+  assert.equal((await setMode('open')).status, 200);
+  console.log('✓ Регистрация по приглашению: ссылка в заметку, режим «по приглашениям», отзыв');
   spaceLive.doc.transact(() => {
     spaceLive.doc.getMap('purged').set(collabId, true);
     spaceLive.doc.getMap('notes').delete(collabId);

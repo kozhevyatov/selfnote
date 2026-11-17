@@ -19,6 +19,7 @@ import { api, type User } from './api';
 import { ACCENTS, type Theme } from './theme';
 import { ColorPicker } from './ColorPicker';
 import { Backups, DataSettings } from './DataSettings';
+import { InvitesCard } from './Invites';
 import { useUI, type SettingsSection, type Workspace } from './store';
 
 interface SectionInfo {
@@ -461,7 +462,6 @@ function UsersSettings({ me, toast }: { me: User; toast: (message: string) => vo
       </p>
     );
   if (!state) return <p className="muted settings-lead">Загрузка…</p>;
-  const open = state.registration === 'open';
   return (
     <>
       <p className="muted settings-lead">Аккаунты на этом сервере. У каждого свои заметки.</p>
@@ -471,6 +471,7 @@ function UsersSettings({ me, toast }: { me: User; toast: (message: string) => vo
           {(
             [
               ['open', 'Открыта'],
+              ['invite', 'По приглашениям'],
               ['closed', 'Закрыта'],
             ] as const
           ).map(([mode, label]) => (
@@ -478,8 +479,8 @@ function UsersSettings({ me, toast }: { me: User; toast: (message: string) => vo
               key={mode}
               type="button"
               role="radio"
-              aria-checked={open === (mode === 'open')}
-              className={open === (mode === 'open') ? 'selected' : ''}
+              aria-checked={state.registration === mode}
+              className={state.registration === mode ? 'selected' : ''}
               disabled={busy}
               onClick={() =>
                 run(async () => {
@@ -496,11 +497,14 @@ function UsersSettings({ me, toast }: { me: User; toast: (message: string) => vo
           ))}
         </div>
         <p className="small muted">
-          {open
+          {state.registration === 'open'
             ? 'Любой, кто откроет сервис, может создать себе аккаунт.'
-            : 'Новых пользователей добавляет только администратор — ниже.'}
+            : state.registration === 'invite'
+              ? 'Аккаунт создаётся только по ссылке-приглашению. Ссылки выдаёте вы ниже, а владельцы заметок — когда приглашают в заметку человека без аккаунта.'
+              : 'Новых пользователей добавляет только администратор — ниже.'}
         </p>
       </section>
+      <InvitesCard registration={state.registration} toast={toast} />
       <section className="settings-card">
         <h2>
           Пользователи <small>{state.users.length}</small>

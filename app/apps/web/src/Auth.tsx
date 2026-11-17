@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { FileText, ArrowRight, Database, ShieldCheck, RotateCcw } from 'lucide-react';
 import { api, setToken, type User } from './api';
 export function Auth({
@@ -10,7 +10,23 @@ export function Auth({
   registration: string;
   onLogin: (user: User) => void;
 }) {
+  /** Ссылка-приглашение: /?invite=<токен>. */
+  const [inviteToken] = useState(() => new URLSearchParams(location.search).get('invite'));
+  const [invite, setInvite] = useState<{
+    email: string | null;
+    inviter: string;
+    noteTitle: string | null;
+  } | null>(null);
   const [register, setRegister] = useState(false);
+  useEffect(() => {
+    if (!inviteToken || setup) return;
+    api<NonNullable<typeof invite>>(`/api/invites/${encodeURIComponent(inviteToken)}`)
+      .then((value) => {
+        setInvite(value);
+        setRegister(true);
+      })
+      .catch((err) => setError((err as Error).message));
+  }, [inviteToken, setup]);
   const [database, setDatabase] = useState('sqlite');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -62,6 +78,7 @@ export function Auth({
             password: form.get('password'),
             name: form.get('name'),
           };
+          if (register && invite && inviteToken) body.invite = inviteToken;
           if (setup) {
             body.registration = form.get('registration');
             body.database = databaseConfig;
@@ -72,6 +89,7 @@ export function Auth({
               { method: 'POST', body: JSON.stringify(body) },
             );
             setToken(result.accessToken);
+            if (inviteToken) history.replaceState(null, '', location.pathname);
             onLogin(result.user);
           } catch (err) {
             setError((err as Error).message);
@@ -97,7 +115,11 @@ export function Auth({
             ? restore
               ? 'Загрузите файл резервной копии SelfNote и выберите, где хранить данные. Аккаунты и заметки вернутся из копии.'
               : 'Настройте SelfNote один раз — и всё готово. Заметки останутся на вашем сервере.'
-            : 'Заметки, планы и маленькие большие идеи — в одном месте.'}
+            : invite && register
+              ? `${invite.inviter || 'Владелец сервиса'} приглашает вас в SelfNote${
+                  invite.noteTitle ? ` — к заметке «${invite.noteTitle}»` : ''
+                }. Создайте аккаунт, чтобы продолжить.`
+              : 'Заметки, планы и маленькие большие идеи — в одном месте.'}
         </p>
         {setup && restore && (
           <label>
@@ -127,6 +149,9 @@ export function Auth({
                 autoComplete="username"
                 required
                 placeholder="name@example.ru"
+                key={register && invite?.email ? 'invite-email' : 'email'}
+                defaultValue={register && invite?.email ? invite.email : undefined}
+                readOnly={!!(register && invite?.email)}
               />
             </label>
             <label>
@@ -206,7 +231,7 @@ export function Auth({
                 <select name="registration" defaultValue="closed">
                   <option value="closed">Закрыта — только мой аккаунт</option>
                   <option value="open">Открыта — любой может зарегистрироваться</option>
-                  <option value="invite">По приглашению (доступ появится позже)</option>
+                  <option value="invite">По приглашению — по ссылкам, которые вы выдаёте</option>
                 </select>
               </label>
             )}
@@ -242,7 +267,7 @@ export function Auth({
             {restore ? 'Настроить новое пространство' : 'Восстановить из резервной копии'}
           </button>
         )}
-        {!setup && registration === 'open' && (
+        {!setup && (registration === 'open' || invite) && (
           <button type="button" className="text-button" onClick={() => setRegister(!register)}>
             {register ? 'Уже есть аккаунт? Войти' : 'Создать аккаунт'}
           </button>

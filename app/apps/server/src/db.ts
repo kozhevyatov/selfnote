@@ -20,6 +20,18 @@ export type Config =
       password: string;
     };
 interface Database {
+  invites: {
+    id: string;
+    token: string;
+    created_by: string;
+    email: string | null;
+    note_id: string | null;
+    note_role: string | null;
+    expires_at: string;
+    used_at: string | null;
+    used_by: string | null;
+    created_at: string;
+  };
   note_attachments: {
     note_id: string;
     attachment_id: string;
@@ -126,6 +138,25 @@ export async function openDatabase(config: Config): Promise<DB> {
     db: conn,
     provider: {
       getMigrations: async () => ({
+        '008_invites': {
+          up: async (d: Kysely<unknown>) => {
+            await d.schema
+              .createTable('invites')
+              .addColumn('id', 'varchar(36)', (c) => c.primaryKey())
+              .addColumn('token', 'varchar(64)', (c) => c.notNull().unique())
+              .addColumn('created_by', 'varchar(36)', (c) =>
+                c.notNull().references('users.id').onDelete('cascade'),
+              )
+              .addColumn('email', 'varchar(254)')
+              .addColumn('note_id', 'varchar(36)')
+              .addColumn('note_role', 'varchar(20)')
+              .addColumn('expires_at', 'varchar(30)', (c) => c.notNull())
+              .addColumn('used_at', 'varchar(30)')
+              .addColumn('used_by', 'varchar(36)')
+              .addColumn('created_at', 'varchar(30)', (c) => c.notNull())
+              .execute();
+          },
+        },
         '007_note_attachments': {
           up: async (d: Kysely<unknown>) => {
             await d.schema

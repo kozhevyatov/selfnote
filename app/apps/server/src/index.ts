@@ -234,13 +234,19 @@ app.post(
   '/api/auth/register',
   { config: { rateLimit: { max: 5, timeWindow: '1 minute' } } },
   async (request, reply) => {
-    const input = registration.parse(request.body);
-    const mode = await database()
-      .selectFrom('settings')
-      .select('value')
-      .where('key', '=', 'registration')
-      .executeTakeFirst();
-    if (mode?.value !== 'open') return reply.code(403).send({ message: 'Регистрация закрыта' });
+    const input = registration
+      .extend({ invite: z.string().max(64).optional() })
+      .parse(request.body);
+    const mode = await registrationMode();
+    const invite = input.invite ? await findInvite(input.invite) : undefined;
+    if (input.invite && !invite)
+      return reply.code(410).send({ message: 'Приглашение недействительно или уже использовано' });
+    if (invite?.email && invite.email !== input.email)
+      return reply.code(403).send({ message: `Приглашение выдано для адреса ${invite.email}` });
+    if (mode !== 'open' && !invite)
+      return reply.code(403).send({
+        message: mode === 'invite' ? 'Регистрация только по приглашению' : 'Регистрация закрыта',
+      });
     if (
       await database()
         .selectFrom('users')
@@ -259,6 +265,7 @@ app.post(
         created_at: new Date().toISOString(),
       })
       .execute();
+    if (invite) await useInvite(invite, user.id);
     return issueSession(user, reply);
   },
 );
@@ -408,7 +415,7 @@ app.get('/api/admin/users', async (request) => {
 });
 app.put('/api/admin/registration', async (request) => {
   await requireAdmin(request);
-  const { mode } = z.object({ mode: z.enum(['open', 'closed']) }).parse(request.body);
+  const { mode } = z.object({ mode: z.enum(['open', 'invite', 'closed']) }).parse(request.body);
   const exists = await database()
     .selectFrom('settings')
     .select('key')
@@ -423,6 +430,142 @@ app.put('/api/admin/registration', async (request) => {
   else
     await database().insertInto('settings').values({ key: 'registration', value: mode }).execute();
   return { registration: mode };
+});
+// ===== Приглашения на регистрацию =====
+const INVITE_TTL_MS = 7 * 24 * 3600 * 1000;
+const inviteColumns = [
+  'invites.id',
+  'invites.token',
+  'invites.email',
+  'invites.note_id',
+  'invites.note_role',
+  'invites.expires_at',
+  'invites.created_at',
+] as const;
+/** Действующее приглашение: не использовано, не истекло, регистрация не закрыта. */
+async function findInvite(token: string) {
+  if ((await registrationMode()) === 'closed') return undefined;
+  return database()
+    .selectFrom('invites')
+    .selectAll()
+    .where('token', '=', token)
+    .where('used_at', 'is', null)
+    .where('expires_at', '>', new Date().toISOString())
+    .executeTakeFirst();
+}
+async function createInvite(
+  createdBy: string,
+  email: string | null,
+  note?: { id: string; role: 'editor' | 'reader' },
+) {
+  const now = new Date();
+  const invite = {
+    id: randomUUID(),
+    token: randomBytes(24).toString('base64url'),
+    created_by: createdBy,
+    email,
+    note_id: note?.id ?? null,
+    note_role: note?.role ?? null,
+    expires_at: new Date(now.getTime() + INVITE_TTL_MS).toISOString(),
+    used_at: null,
+    used_by: null,
+    created_at: now.toISOString(),
+  };
+  await database().insertInto('invites').values(invite).execute();
+  return invite;
+}
+/** Отмечаем приглашение использованным; приглашение в заметку сразу даёт доступ. */
+async function useInvite(
+  invite: NonNullable<Awaited<ReturnType<typeof findInvite>>>,
+  user: string,
+) {
+  await database()
+    .updateTable('invites')
+    .set({ used_at: new Date().toISOString(), used_by: user })
+    .where('id', '=', invite.id)
+    .execute();
+  if (!invite.note_id || (invite.note_role !== 'editor' && invite.note_role !== 'reader')) return;
+  const noteId = invite.note_id,
+    role = invite.note_role;
+  await serializeDocuments(async () => {
+    try {
+      const meta = await manageNote(noteId, invite.created_by);
+      await addMember(noteId, invite.created_by, meta, user, role, new Date().toISOString());
+    } catch {
+      /* Заметку удалили или закрыли паролем — аккаунт создан, доступа к заметке нет. */
+    }
+  });
+}
+app.get(
+  '/api/invites/:token',
+  { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } },
+  async (request, reply) => {
+    const { token } = z.object({ token: z.string().max(64) }).parse(request.params);
+    const invite = await findInvite(token);
+    if (!invite)
+      return reply.code(410).send({ message: 'Приглашение недействительно или уже использовано' });
+    const inviter = await database()
+      .selectFrom('users')
+      .select('name')
+      .where('id', '=', invite.created_by)
+      .executeTakeFirst();
+    let noteTitle: string | null = null;
+    if (invite.note_id) {
+      const meta = await spaceNote(invite.created_by, invite.note_id).catch(() => null);
+      noteTitle = meta && !meta.deletedAt ? meta.title || 'Без названия' : null;
+    }
+    return { email: invite.email, inviter: inviter?.name ?? '', noteTitle };
+  },
+);
+app.get('/api/admin/invites', async (request) => {
+  await requireAdmin(request);
+  return database()
+    .selectFrom('invites')
+    .innerJoin('users', 'users.id', 'invites.created_by')
+    .select([...inviteColumns, 'users.name as created_by_name'])
+    .where('invites.used_at', 'is', null)
+    .where('invites.expires_at', '>', new Date().toISOString())
+    .orderBy('invites.created_at', 'desc')
+    .execute();
+});
+app.post(
+  '/api/admin/invites',
+  { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } },
+  async (request) => {
+    const me = await requireAdmin(request);
+    const { email } = z
+      .object({
+        email: z
+          .union([z.email().max(254), z.literal('')])
+          .optional()
+          .transform((v) => (v ? v.toLowerCase().trim() : null)),
+      })
+      .parse(request.body ?? {});
+    if (
+      email &&
+      (await database()
+        .selectFrom('users')
+        .select('id')
+        .where('email', '=', email)
+        .executeTakeFirst())
+    )
+      throw Object.assign(new Error('Этот адрес уже зарегистрирован'), { statusCode: 409 });
+    const invite = await createInvite(me, email);
+    return { id: invite.id, token: invite.token, email, expires_at: invite.expires_at };
+  },
+);
+app.delete('/api/invites/:id', async (request, reply) => {
+  const user = await userId(request);
+  const { id } = z.object({ id: z.uuid() }).parse(request.params);
+  const invite = await database()
+    .selectFrom('invites')
+    .select('created_by')
+    .where('id', '=', id)
+    .executeTakeFirst();
+  if (!invite) return reply.code(404).send({ message: 'Приглашение не найдено' });
+  if (invite.created_by !== user) await requireAdmin(request);
+  await database().deleteFrom('invites').where('id', '=', id).execute();
+  return { ok: true };
 });
 app.post('/api/admin/users', async (request, reply) => {
   await requireAdmin(request);
@@ -1569,10 +1712,41 @@ app.post(
         .select('id')
         .where('email', '=', input.email)
         .executeTakeFirst();
-      if (!target)
-        throw Object.assign(new Error('Пользователь с таким адресом не найден'), {
-          statusCode: 404,
-        });
+      if (!target) {
+        if ((await registrationMode()) === 'closed')
+          throw Object.assign(
+            new Error('Пользователь с таким адресом не найден, а регистрация на сервере закрыта'),
+            { statusCode: 404 },
+          );
+        // Аккаунта нет — выдаём ссылку на регистрацию, после неё доступ к заметке появится сам.
+        const pending = await database()
+          .selectFrom('invites')
+          .select(['id', 'token', 'expires_at'])
+          .where('note_id', '=', id)
+          .where('email', '=', input.email)
+          .where('used_at', 'is', null)
+          .where('expires_at', '>', new Date().toISOString())
+          .executeTakeFirst();
+        if (pending) {
+          await database()
+            .updateTable('invites')
+            .set({ note_role: input.role })
+            .where('id', '=', pending.id)
+            .execute();
+          return { ok: true, invite: { ...pending, email: input.email, role: input.role } };
+        }
+        const invite = await createInvite(user, input.email, { id, role: input.role });
+        return {
+          ok: true,
+          invite: {
+            id: invite.id,
+            token: invite.token,
+            expires_at: invite.expires_at,
+            email: input.email,
+            role: input.role,
+          },
+        };
+      }
       if (target.id === user)
         throw Object.assign(new Error('Вы уже владелец этой заметки'), { statusCode: 400 });
       const exists = await database()
@@ -1582,34 +1756,58 @@ app.post(
         .where('user_id', '=', target.id)
         .executeTakeFirst();
       if (exists) throw Object.assign(new Error('Пользователь уже приглашён'), { statusCode: 409 });
-      // Общий заголовок хранится в документе заметки, чужое пространство не раскрывается.
-      const connection = await collab.openDirectConnection(`note:${id}`, {
-        owner: user,
-        historyOperation: true,
-      });
-      try {
-        await connection.transact((doc) => {
-          const fields = doc.getMap('collaboration');
-          if (!fields.has('title')) fields.set('title', meta.title);
-          if (!fields.has('updatedAt')) fields.set('updatedAt', meta.updatedAt);
-        });
-      } finally {
-        await connection.disconnect();
-      }
-      await database()
-        .insertInto('note_members')
-        .values({
-          note_id: id,
-          user_id: target.id,
-          role: input.role,
-          accepted_at: null,
-          created_at: new Date().toISOString(),
-        })
-        .execute();
+      await addMember(id, user, meta, target.id, input.role, null);
       return { ok: true };
     });
   },
 );
+/** Вызывать внутри serializeDocuments, после manageNote. */
+async function addMember(
+  id: string,
+  owner: string,
+  meta: Note,
+  target: string,
+  role: 'editor' | 'reader',
+  acceptedAt: string | null,
+) {
+  // Общий заголовок хранится в документе заметки, чужое пространство не раскрывается.
+  const connection = await collab.openDirectConnection(`note:${id}`, {
+    owner,
+    historyOperation: true,
+  });
+  try {
+    await connection.transact((doc) => {
+      const fields = doc.getMap('collaboration');
+      if (!fields.has('title')) fields.set('title', meta.title);
+      if (!fields.has('updatedAt')) fields.set('updatedAt', meta.updatedAt);
+    });
+  } finally {
+    await connection.disconnect();
+  }
+  await database()
+    .insertInto('note_members')
+    .values({
+      note_id: id,
+      user_id: target,
+      role,
+      accepted_at: acceptedAt,
+      created_at: new Date().toISOString(),
+    })
+    .execute();
+}
+app.get('/api/notes/:id/invites', async (request) => {
+  const user = await userId(request);
+  const id = z.uuid().parse((request.params as { id: string }).id);
+  await manageNote(id, user);
+  return database()
+    .selectFrom('invites')
+    .select([...inviteColumns])
+    .where('invites.note_id', '=', id)
+    .where('invites.used_at', 'is', null)
+    .where('invites.expires_at', '>', new Date().toISOString())
+    .orderBy('invites.created_at')
+    .execute();
+});
 app.patch('/api/notes/:id/members/:uid', async (request) => {
   const user = await userId(request);
   const { id, uid } = z.object({ id: z.uuid(), uid: z.uuid() }).parse(request.params);

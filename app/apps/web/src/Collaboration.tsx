@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Users, X } from 'lucide-react';
+import { Copy, Trash2, Users, X } from 'lucide-react';
 import { api } from './api';
+import { copyInvite, type InviteRow } from './Invites';
 import type { Workspace } from './store';
 
 interface Member {
@@ -25,14 +26,20 @@ export function MembersDialog({
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [invites, setInvites] = useState<InviteRow[]>([]);
+  const [notice, setNotice] = useState('');
+  const toast = (message: string) => setNotice(message);
   const reload = async () => {
     setMembers(await api<Member[]>(`/api/notes/${id}/members`));
+    setInvites(await api<InviteRow[]>(`/api/notes/${id}/invites`).catch(() => []));
     await workspace.refreshCollaboration();
   };
   useEffect(() => {
     let active = true;
     api<Member[]>(`/api/notes/${id}/members`)
       .then((rows) => active && setMembers(rows))
+      .then(() => api<InviteRow[]>(`/api/notes/${id}/invites`))
+      .then((rows) => active && rows && setInvites(rows))
       .catch((e) => active && setError(e.message))
       .finally(() => active && setLoading(false));
     return () => {
@@ -42,6 +49,7 @@ export function MembersDialog({
   const run = async (action: () => Promise<unknown>) => {
     setBusy(true);
     setError('');
+    setNotice('');
     try {
       await action();
       await reload();
@@ -70,8 +78,8 @@ export function MembersDialog({
           </button>
         </div>
         <p className="muted small">
-          Пригласите пользователя SelfNote по адресу его аккаунта. Приглашение появится у него в
-          разделе «Общие».
+          Пригласите пользователя SelfNote по адресу его аккаунта — приглашение появится у него в
+          разделе «Общие». Если аккаунта нет, получите ссылку на регистрацию.
         </p>
         <form
           className="share-form"
@@ -79,11 +87,17 @@ export function MembersDialog({
             e.preventDefault();
             void run(async () => {
               await workspace.whenSynced(id);
-              await api(`/api/notes/${id}/members`, {
+              const result = await api<{ invite?: InviteRow }>(`/api/notes/${id}/members`, {
                 method: 'POST',
                 body: JSON.stringify({ email: email.trim(), role }),
               });
               setEmail('');
+              if (result.invite) {
+                await copyInvite(result.invite.token, toast);
+                setNotice(
+                  `У ${result.invite.email} ещё нет аккаунта. Ссылка на регистрацию скопирована — отправьте её; после регистрации доступ к заметке появится сам.`,
+                );
+              }
             });
           }}
         >
@@ -116,6 +130,11 @@ export function MembersDialog({
             {error}
           </p>
         )}
+        {notice && (
+          <p className="small muted" role="status">
+            {notice}
+          </p>
+        )}
         <h3>Участники</h3>
         <p className="small muted">
           Вы — владелец. Только вы управляете участниками, публичными ссылками и удалением заметки.
@@ -123,9 +142,38 @@ export function MembersDialog({
         {loading ? (
           <p>Загрузка…</p>
         ) : (
-          !members.length && <p className="muted">Других участников пока нет.</p>
+          !members.length && !invites.length && <p className="muted">Других участников пока нет.</p>
         )}
         <div className="members-list">
+          {invites.map((invite) => (
+            <div className="member-row" key={invite.id}>
+              <div>
+                <strong>{invite.email}</strong>
+                <span className="small muted">
+                  Ждёт регистрации · {invite.note_role === 'reader' ? 'читатель' : 'редактор'}
+                </span>
+              </div>
+              <button
+                className="icon-button"
+                aria-label="Скопировать ссылку-приглашение"
+                title="Скопировать ссылку"
+                onClick={() => void copyInvite(invite.token, toast)}
+              >
+                <Copy size={16} />
+              </button>
+              <button
+                className="icon-button"
+                aria-label="Отозвать приглашение"
+                title="Отозвать"
+                disabled={busy}
+                onClick={() =>
+                  void run(() => api(`/api/invites/${invite.id}`, { method: 'DELETE' }))
+                }
+              >
+                <Trash2 size={16} />
+              </button>
+            </div>
+          ))}
           {members.map((member) => (
             <div className="member-row" key={member.id}>
               <div>
