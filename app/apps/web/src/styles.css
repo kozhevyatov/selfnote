@@ -331,6 +331,13 @@ small,
 .section-heading .icon-button {
   height: 36px;
 }
+.section-actions {
+  display: inline-flex;
+  align-items: center;
+}
+.section-actions .icon-button {
+  width: 34px;
+}
 .book-row {
   display: flex;
   align-items: center;
@@ -624,6 +631,12 @@ small,
   min-height: 64px;
   border-radius: 12px;
   overflow: hidden;
+}
+/* Строки за пределами экрана браузер не раскладывает и не рисует — список
+   из сотен заметок открывается сразу. 68px — обычная высота строки. */
+.notes-scroll .note-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 68px;
 }
 .note-row.selected {
   background: var(--selection);

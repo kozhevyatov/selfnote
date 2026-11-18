@@ -34,7 +34,6 @@ import {
   LockOpen,
   Share2,
   FolderInput,
-  ArrowUpDown,
 } from 'lucide-react';
 import MiniSearch from 'minisearch';
 import {
@@ -63,7 +62,12 @@ const timeFormat = new Intl.DateTimeFormat('ru', { hour: '2-digit', minute: '2-d
 const dayMonthFormat = new Intl.DateTimeFormat('ru', { day: 'numeric', month: 'long' });
 const monthFormat = new Intl.DateTimeFormat('ru', { month: 'long' });
 /** Превью в списке — одна строка; весь текст заметки в DOM не нужен. */
-const PREVIEW_CHARS = 200;
+const PREVIEW_CHARS = 70;
+function preview(text: string) {
+  // пробелы и переносы схлопываем до обрезки, чтобы пустые строки не съедали лимит
+  const flat = text.slice(0, PREVIEW_CHARS * 4).replace(/\s+/g, ' ').trim();
+  return flat.length > PREVIEW_CHARS ? `${flat.slice(0, PREVIEW_CHARS).trimEnd()}…` : flat;
+}
 const NOTE_TYPE = 'application/x-selfnote-note';
 interface Dialog {
   title: string;
@@ -71,9 +75,12 @@ interface Dialog {
   label: string;
   danger?: boolean;
   confirm?: string;
-  action: (value: string, color: string, icon: string) => void;
+  action: (value: string, color: string, icon: string, parent: string) => void;
   color?: string;
   icon?: string;
+  /** Создание с выбором места: '' — новая книжка, id книжки — подраздел в ней. */
+  parents?: { id: string; name: string }[];
+  parent?: string;
 }
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -445,6 +452,25 @@ function WorkspaceShell({
     a === 'Закреплённые' ? -1 : b === 'Закреплённые' ? 1 : 0,
   );
   // stay — вызвано со страницы «Настройки → Записные книжки»: не уходить с неё
+  /** Новая книжка или подраздел — место выбирается в самом окне. */
+  function addNode(stay = false, parent = '') {
+    setDialog({
+      title: 'Создать',
+      label: 'Название',
+      value: '',
+      color: colors[notebooks.length % colors.length],
+      icon: 'book',
+      parents: notebooks.map((book) => ({ id: book.id, name: book.name })),
+      parent,
+      action: (name, color, icon, parentId) => {
+        const id = uuid();
+        if (parentId && workspace.notebooks.has(parentId))
+          workspace.sections.set(id, { id, notebookId: parentId, name });
+        else workspace.notebooks.set(id, { id, name, color, icon });
+        if (!stay) ui.setFilter(id);
+      },
+    });
+  }
   function editNotebook(book?: Notebook, stay = false) {
     setDialog({
       title: book ? 'Настройки книжки' : 'Новая записная книжка',
@@ -636,23 +662,24 @@ function WorkspaceShell({
           </nav>
           <div className="section-heading">
             <span>Записные книжки</span>
-            {notebooks.length > 1 && (
+            <span className="section-actions">
               <button
                 className="icon-button"
-                aria-label="Порядок и управление книжками"
-                title="Порядок и управление"
+                aria-label="Управление записными книжками"
+                title="Порядок, правка, удаление"
                 onClick={() => ui.openSettings('notebooks')}
               >
-                <ArrowUpDown size={15} />
+                <Settings2 size={16} />
               </button>
-            )}
-            <button
-              className="icon-button"
-              aria-label="Новая записная книжка"
-              onClick={() => editNotebook()}
-            >
-              <Plus size={16} />
-            </button>
+              <button
+                className="icon-button"
+                aria-label="Новая книжка или подраздел"
+                title="Новая книжка или подраздел"
+                onClick={() => addNode()}
+              >
+                <Plus size={16} />
+              </button>
+            </span>
           </div>
           {notebooks.map((book) => (
             <div key={book.id} className="notebook">
@@ -685,19 +712,6 @@ function WorkspaceShell({
                     )}
                   </button>
                 )}
-                <details className="row-menu">
-                  <summary aria-label={`Действия с книжкой ${book.name}`}>
-                    <MoreHorizontal size={15} />
-                  </summary>
-                  <div className="popover">
-                    <button onClick={() => editNotebook(book)}>Настройки книжки</button>
-                    <button onClick={() => editSection(book.id)}>Добавить подраздел</button>
-                    <button onClick={() => ui.openSettings('notebooks')}>Порядок книжек…</button>
-                    <button className="danger-text" onClick={() => removeNotebook(book)}>
-                      Удалить
-                    </button>
-                  </div>
-                </details>
               </div>
               {!collapsed.has(book.id) && sections.some((s) => s.notebookId === book.id) && (
                 <div className="subsections">
@@ -735,7 +749,7 @@ function WorkspaceShell({
             </div>
           ))}
           {!notebooks.length && (
-            <button className="empty-nav" onClick={() => editNotebook()}>
+            <button className="empty-nav" onClick={() => addNode()}>
               Создайте книжку для работы, дома или новых идей
             </button>
           )}
@@ -979,10 +993,10 @@ function WorkspaceShell({
             onUserChange={onUserChange}
             onLogout={onLogout}
             notebookActions={{
-              addNotebook: () => editNotebook(undefined, true),
+              addNotebook: () => addNode(true),
               editNotebook: (book) => editNotebook(book, true),
               removeNotebook: (book) => removeNotebook(book, true),
-              addSection: (notebookId) => editSection(notebookId, undefined, true),
+              addSection: (notebookId) => addNode(true, notebookId),
               editSection: (section) => editSection(section.notebookId, section, true),
               removeSection: (section) => removeSection(section, true),
             }}
@@ -1791,8 +1805,7 @@ function Preview({
     );
   return (
     <>
-      {text.slice(0, PREVIEW_CHARS).replace(/\s+/g, ' ') ||
-        (workspace.isLoaded(note.id) ? 'Пока здесь чистый лист' : '…')}
+      {preview(text) || (workspace.isLoaded(note.id) ? 'Пока здесь чистый лист' : '…')}
     </>
   );
 }
@@ -1800,6 +1813,9 @@ function EditDialog({ dialog, close }: { dialog: Dialog; close: () => void }) {
   const [value, setValue] = useState(dialog.value);
   const [color, setColor] = useState(dialog.color || colors[0]);
   const [icon, setIcon] = useState(dialog.icon || 'book');
+  const [parent, setParent] = useState(dialog.parent ?? '');
+  const choosing = Boolean(dialog.parents);
+  const title = choosing ? (parent ? 'Новый подраздел' : 'Новая записная книжка') : dialog.title;
   return (
     <div className="modal-backdrop" onClick={close}>
       <form
@@ -1810,11 +1826,11 @@ function EditDialog({ dialog, close }: { dialog: Dialog; close: () => void }) {
         onClick={(e) => e.stopPropagation()}
         onSubmit={(e) => {
           e.preventDefault();
-          dialog.action(value.trim(), color, icon);
+          dialog.action(value.trim(), color, icon, parent);
           close();
         }}
       >
-        <h2 id="dialog-title">{dialog.title}</h2>
+        <h2 id="dialog-title">{title}</h2>
         {dialog.danger ? (
           <p>{dialog.label}</p>
         ) : (
@@ -1829,7 +1845,22 @@ function EditDialog({ dialog, close }: { dialog: Dialog; close: () => void }) {
             />
           </label>
         )}
-        {dialog.color && (
+        {choosing && (dialog.parents?.length ?? 0) > 0 && (
+          <label>
+            Где создать
+            <select value={parent} onChange={(e) => setParent(e.target.value)}>
+              <option value="">Новая записная книжка</option>
+              <optgroup label="Подраздел в книжке">
+                {dialog.parents!.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </optgroup>
+            </select>
+          </label>
+        )}
+        {dialog.color && !parent && (
           <div className="color-options">
             {colors.map((c) => (
               <button
@@ -1846,7 +1877,7 @@ function EditDialog({ dialog, close }: { dialog: Dialog; close: () => void }) {
             <ColorPicker value={color} onChange={setColor} label="Выбрать другой цвет" />
           </div>
         )}
-        {dialog.icon !== undefined && <NotebookIconPicker value={icon} onChange={setIcon} />}
+        {dialog.icon !== undefined && !parent && <NotebookIconPicker value={icon} onChange={setIcon} />}
         <div className="actions">
           <button type="button" onClick={close}>
             Отмена
