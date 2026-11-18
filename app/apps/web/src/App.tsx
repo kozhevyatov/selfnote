@@ -34,6 +34,7 @@ import {
   LockOpen,
   Share2,
   FolderInput,
+  ArrowUpDown,
 } from 'lucide-react';
 import MiniSearch from 'minisearch';
 import {
@@ -56,6 +57,13 @@ import { Workspace, useUI } from './store';
 import { NoteEditor, Due } from './Editor';
 import { flushImages } from './attachments';
 const colors = ['#C2410C', '#3451D1', '#2B7A3D', '#7A3DB8'];
+// Форматтеры создаём один раз: toLocale…String на каждую строку списка заново
+// собирает Intl-форматтер, а при сотнях заметок это заметно.
+const timeFormat = new Intl.DateTimeFormat('ru', { hour: '2-digit', minute: '2-digit' });
+const dayMonthFormat = new Intl.DateTimeFormat('ru', { day: 'numeric', month: 'long' });
+const monthFormat = new Intl.DateTimeFormat('ru', { month: 'long' });
+/** Превью в списке — одна строка; весь текст заметки в DOM не нужен. */
+const PREVIEW_CHARS = 200;
 const NOTE_TYPE = 'application/x-selfnote-note';
 interface Dialog {
   title: string;
@@ -247,8 +255,8 @@ function WorkspaceShell({
       return () => clearTimeout(timer);
     }
   }, [ui.message]);
-  const notebooks = [...workspace.notebooks.values()];
-  const sections = [...workspace.sections.values()];
+  const notebooks = workspace.orderedNotebooks();
+  const sections = workspace.orderedSections();
   const notes = [...workspace.metadata.values()];
   const [history, setHistory] = useState(false);
   const [appearance, setAppearanceState] = useState(storedAppearance);
@@ -398,7 +406,8 @@ function WorkspaceShell({
     now.getMonth(),
     now.getDate() - ((now.getDay() + 6) % 7),
   );
-  const dayMonth = (d: Date) => d.toLocaleDateString('ru', { day: 'numeric', month: 'long' });
+  const yesterday = localDate(yesterdayDate);
+  const dayMonth = (d: Date) => dayMonthFormat.format(d);
   for (const note of filtered.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))) {
     const updated = new Date(note.updatedAt);
     const date = localDate(updated);
@@ -408,7 +417,7 @@ function WorkspaceShell({
     else if (date === today) {
       group = 'Сегодня';
       caption = dayMonth(now);
-    } else if (date === localDate(yesterdayDate)) {
+    } else if (date === yesterday) {
       group = 'Вчера';
       caption = dayMonth(yesterdayDate);
     } else if (updated >= weekStart) {
@@ -423,7 +432,7 @@ function WorkspaceShell({
           ? `${weekStart.getDate()}–${dayMonth(end)}`
           : `${dayMonth(weekStart)} – ${dayMonth(end)}`;
     } else {
-      const month = updated.toLocaleDateString('ru', { month: 'long' });
+      const month = monthFormat.format(updated);
       group = month[0].toUpperCase() + month.slice(1);
       if (updated.getFullYear() !== now.getFullYear()) group += ` ${updated.getFullYear()}`;
       caption = String(updated.getFullYear());
@@ -435,7 +444,8 @@ function WorkspaceShell({
   const groupList = [...groups].sort(([a], [b]) =>
     a === 'Закреплённые' ? -1 : b === 'Закреплённые' ? 1 : 0,
   );
-  function editNotebook(book?: Notebook) {
+  // stay — вызвано со страницы «Настройки → Записные книжки»: не уходить с неё
+  function editNotebook(book?: Notebook, stay = false) {
     setDialog({
       title: book ? 'Настройки книжки' : 'Новая записная книжка',
       label: 'Название',
@@ -445,11 +455,11 @@ function WorkspaceShell({
       action: (name, color, icon) => {
         const id = book?.id || uuid();
         workspace.notebooks.set(id, { ...book, id, name, color, icon });
-        if (!book) ui.setFilter(id);
+        if (!book && !stay) ui.setFilter(id);
       },
     });
   }
-  function editSection(notebookId: string, section?: Section) {
+  function editSection(notebookId: string, section?: Section, stay = false) {
     setDialog({
       title: section ? 'Переименовать подраздел' : 'Новый подраздел',
       label: 'Название',
@@ -457,11 +467,14 @@ function WorkspaceShell({
       action: (name) => {
         const id = section?.id || uuid();
         workspace.sections.set(id, { id, notebookId, name });
-        ui.setFilter(id);
+        if (!stay) ui.setFilter(id);
       },
     });
   }
-  function removeNotebook(book: Notebook) {
+  function removeNotebook(book: Notebook, stay = false) {
+    const inside =
+      ui.filter === book.id ||
+      sections.some((s) => s.notebookId === book.id && s.id === ui.filter);
     setDialog({
       title: `Удалить «${book.name}»?`,
       label: 'Заметки останутся в разделе «Все заметки».',
@@ -474,14 +487,20 @@ function WorkspaceShell({
             if (note.notebookId === book.id)
               workspace.update(note.id, { notebookId: null, sectionId: null });
           for (const section of sections)
-            if (section.notebookId === book.id) workspace.sections.delete(section.id);
+            if (section.notebookId === book.id) {
+              workspace.sections.delete(section.id);
+              workspace.forgetOrder(section.id);
+            }
           workspace.notebooks.delete(book.id);
+          workspace.forgetOrder(book.id);
         });
-        ui.setFilter('all');
+        // со страницы настроек не уходим, но фильтр на удалённую книжку сбрасываем
+        if (!stay) ui.setFilter('all');
+        else if (inside) useUI.setState({ filter: 'all' });
       },
     });
   }
-  function removeSection(section: Section) {
+  function removeSection(section: Section, stay = false) {
     setDialog({
       title: `Удалить «${section.name}»?`,
       label: 'Заметки останутся в записной книжке.',
@@ -492,8 +511,10 @@ function WorkspaceShell({
           for (const note of notes)
             if (note.sectionId === section.id) workspace.update(note.id, { sectionId: null });
           workspace.sections.delete(section.id);
+          workspace.forgetOrder(section.id);
         });
-        ui.setFilter(section.notebookId);
+        if (!stay) ui.setFilter(section.notebookId);
+        else if (ui.filter === section.id) useUI.setState({ filter: section.notebookId });
       },
     });
   }
@@ -615,6 +636,16 @@ function WorkspaceShell({
           </nav>
           <div className="section-heading">
             <span>Записные книжки</span>
+            {notebooks.length > 1 && (
+              <button
+                className="icon-button"
+                aria-label="Порядок и управление книжками"
+                title="Порядок и управление"
+                onClick={() => ui.openSettings('notebooks')}
+              >
+                <ArrowUpDown size={15} />
+              </button>
+            )}
             <button
               className="icon-button"
               aria-label="Новая записная книжка"
@@ -661,6 +692,7 @@ function WorkspaceShell({
                   <div className="popover">
                     <button onClick={() => editNotebook(book)}>Настройки книжки</button>
                     <button onClick={() => editSection(book.id)}>Добавить подраздел</button>
+                    <button onClick={() => ui.openSettings('notebooks')}>Порядок книжек…</button>
                     <button className="danger-text" onClick={() => removeNotebook(book)}>
                       Удалить
                     </button>
@@ -860,10 +892,7 @@ function WorkspaceShell({
                         {workspace.title(note)}
                       </strong>
                       <time>
-                        {new Date(note.updatedAt).toLocaleTimeString('ru', {
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })}
+                        {timeFormat.format(new Date(note.updatedAt))}
                       </time>
                     </span>
                     <span className="note-preview">
@@ -949,6 +978,14 @@ function WorkspaceShell({
             setAppearance={setAppearance}
             onUserChange={onUserChange}
             onLogout={onLogout}
+            notebookActions={{
+              addNotebook: () => editNotebook(undefined, true),
+              editNotebook: (book) => editNotebook(book, true),
+              removeNotebook: (book) => removeNotebook(book, true),
+              addSection: (notebookId) => editSection(notebookId, undefined, true),
+              editSection: (section) => editSection(section.notebookId, section, true),
+              removeSection: (section) => removeSection(section, true),
+            }}
           />
         ) : selected ? (
           <>
@@ -1754,7 +1791,8 @@ function Preview({
     );
   return (
     <>
-      {text.replace(/\n/g, ' ') || (workspace.isLoaded(note.id) ? 'Пока здесь чистый лист' : '…')}
+      {text.slice(0, PREVIEW_CHARS).replace(/\s+/g, ' ') ||
+        (workspace.isLoaded(note.id) ? 'Пока здесь чистый лист' : '…')}
     </>
   );
 }

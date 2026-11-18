@@ -13,13 +13,85 @@ export interface InviteRow {
   created_by_name?: string;
 }
 export const inviteLink = (token: string) => `${location.origin}/?invite=${token}`;
-export async function copyInvite(token: string, toast: (message: string) => void) {
+
+/**
+ * Копирование в буфер обмена с запасным путём: navigator.clipboard есть только
+ * в защищённом контексте (HTTPS/localhost), а Safari/WebView отказывают в записи,
+ * если с момента нажатия прошёл await. Тогда пробуем старый execCommand('copy').
+ */
+export async function copyText(text: string): Promise<boolean> {
   try {
-    await navigator.clipboard.writeText(inviteLink(token));
-    toast('Ссылка-приглашение скопирована');
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
   } catch {
-    toast('Не удалось скопировать — выделите ссылку вручную');
+    /* падаем на запасной путь */
   }
+  const area = document.createElement('textarea');
+  area.value = text;
+  area.setAttribute('readonly', '');
+  area.style.position = 'fixed';
+  area.style.opacity = '0';
+  area.style.pointerEvents = 'none';
+  document.body.appendChild(area);
+  const active = document.activeElement as HTMLElement | null;
+  area.select();
+  area.setSelectionRange(0, text.length);
+  let ok = false;
+  try {
+    ok = document.execCommand('copy');
+  } catch {
+    ok = false;
+  }
+  area.remove();
+  active?.focus?.();
+  return ok;
+}
+
+export async function copyInvite(
+  token: string,
+  toast: (message: string) => void,
+  { quiet = false }: { quiet?: boolean } = {},
+) {
+  if (await copyText(inviteLink(token))) toast('Ссылка-приглашение скопирована');
+  else if (!quiet) toast('Не удалось скопировать — выделите ссылку вручную');
+  else return false;
+  return true;
+}
+
+/** Ссылка на экране: поле только для чтения (выделяется по клику) + кнопка копирования. */
+export function InviteLinkField({
+  token,
+  toast,
+  autoSelect = false,
+}: {
+  token: string;
+  toast: (message: string) => void;
+  autoSelect?: boolean;
+}) {
+  const url = inviteLink(token);
+  return (
+    <div className="share-created invite-link">
+      <input
+        readOnly
+        value={url}
+        aria-label="Ссылка-приглашение"
+        autoFocus={autoSelect}
+        onFocus={(e) => e.target.select()}
+        onClick={(e) => e.currentTarget.select()}
+      />
+      <button
+        type="button"
+        className="icon-button"
+        aria-label="Скопировать ссылку"
+        title="Скопировать ссылку"
+        onClick={() => void copyInvite(token, toast)}
+      >
+        <Copy size={16} />
+      </button>
+    </div>
+  );
 }
 const until = (iso: string) =>
   new Date(iso).toLocaleDateString('ru', { day: 'numeric', month: 'long' });
@@ -35,6 +107,8 @@ export function InvitesCard({
   const [rows, setRows] = useState<InviteRow[] | null>(null);
   const [email, setEmail] = useState('');
   const [busy, setBusy] = useState(false);
+  /** Приглашение, чья ссылка сейчас показана (только что созданное или раскрытое в списке). */
+  const [shown, setShown] = useState<string | null>(null);
   const load = () =>
     api<InviteRow[]>('/api/admin/invites')
       .then(setRows)
@@ -73,7 +147,10 @@ export function InvitesCard({
                 body: JSON.stringify({ email: email.trim() }),
               });
               setEmail('');
-              await copyInvite(created.token, toast);
+              setShown(created.id);
+              // после await браузер может запретить запись в буфер — тогда молча,
+              // ссылка всё равно на экране
+              await copyInvite(created.token, toast, { quiet: true });
             });
           }}
         >
@@ -93,7 +170,7 @@ export function InvitesCard({
       {rows && rows.length > 0 && (
         <ul className="share-list">
           {rows.map((row) => (
-            <li key={row.id}>
+            <li key={row.id} className={shown === row.id ? 'invite-open' : undefined}>
               <div>
                 <strong>{row.email || 'Любой адрес'}</strong>
                 <small>
@@ -102,6 +179,17 @@ export function InvitesCard({
                   до {until(row.expires_at)}
                 </small>
               </div>
+              {!closed && (
+                <button
+                  className="icon-button"
+                  aria-label={shown === row.id ? 'Скрыть ссылку' : 'Показать ссылку'}
+                  aria-expanded={shown === row.id}
+                  title={shown === row.id ? 'Скрыть ссылку' : 'Показать ссылку'}
+                  onClick={() => setShown(shown === row.id ? null : row.id)}
+                >
+                  <Link2 size={16} />
+                </button>
+              )}
               {!closed && (
                 <button
                   className="icon-button"
@@ -125,6 +213,9 @@ export function InvitesCard({
               >
                 <Trash2 size={16} />
               </button>
+              {!closed && shown === row.id && (
+                <InviteLinkField token={row.token} toast={toast} autoSelect />
+              )}
             </li>
           ))}
         </ul>

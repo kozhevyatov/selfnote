@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Copy, Link2, Lock, Trash2, X } from 'lucide-react';
 import { wrapShareKey, type Note } from '@selfnote/shared';
 import { api } from './api';
+import { copyText } from './Invites';
 import { Switch } from './Switch';
 import { useUI, type Workspace } from './store';
 
@@ -55,12 +56,9 @@ export function ShareDialog({
       .catch(() => setError('Публичные ссылки доступны при подключении к серверу'));
   }, [note.id]);
   async function copy(url: string) {
-    try {
-      await navigator.clipboard.writeText(url);
-      toast('Ссылка скопирована');
-    } catch {
-      toast('Не удалось скопировать — выделите ссылку вручную');
-    }
+    toast(
+      (await copyText(url)) ? 'Ссылка скопирована' : 'Не удалось скопировать — выделите ссылку вручную',
+    );
   }
   async function create() {
     setBusy(true);

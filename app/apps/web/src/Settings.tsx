@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import {
   ArrowLeft,
+  BookCopy,
   Check,
   ChevronRight,
   DatabaseBackup,
@@ -20,6 +21,7 @@ import { ACCENTS, type Theme } from './theme';
 import { ColorPicker } from './ColorPicker';
 import { Backups, DataSettings } from './DataSettings';
 import { InvitesCard } from './Invites';
+import { NotebooksSettings, type NotebookActions } from './Notebooks';
 import { useUI, type SettingsSection, type Workspace } from './store';
 
 interface SectionInfo {
@@ -32,6 +34,12 @@ interface SectionInfo {
 const SECTIONS: SectionInfo[] = [
   { id: 'profile', title: 'Профиль', hint: 'Имя, пароль, устройства', Icon: UserRound },
   { id: 'appearance', title: 'Оформление', hint: 'Тема и цвет акцента', Icon: Palette },
+  {
+    id: 'notebooks',
+    title: 'Записные книжки',
+    hint: 'Порядок, подразделы',
+    Icon: BookCopy,
+  },
   {
     id: 'data',
     title: 'Экспорт и импорт',
@@ -118,6 +126,7 @@ export function SettingsPane({
   setAppearance,
   onUserChange,
   onLogout,
+  notebookActions,
 }: {
   user: User;
   workspace: Workspace;
@@ -125,6 +134,7 @@ export function SettingsPane({
   setAppearance: (theme: Theme, accent: string) => void;
   onUserChange: (user: User) => void;
   onLogout: () => void;
+  notebookActions: NotebookActions;
 }) {
   const section = useUI((s) => s.settings);
   const toast = useUI((s) => s.toast);
@@ -144,6 +154,9 @@ export function SettingsPane({
         )}
         {info.id === 'appearance' && (
           <Appearance appearance={appearance} setAppearance={setAppearance} />
+        )}
+        {info.id === 'notebooks' && (
+          <NotebooksSettings workspace={workspace} actions={notebookActions} />
         )}
         {info.id === 'data' && (
           <>

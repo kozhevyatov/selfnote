@@ -17,7 +17,13 @@ import { uuid } from './ids';
 import { SecureNotes, secureTitle } from './secure';
 import type { Theme } from './theme';
 /** Разделы страницы настроек. */
-export type SettingsSection = 'profile' | 'appearance' | 'data' | 'backups' | 'users';
+export type SettingsSection =
+  | 'profile'
+  | 'appearance'
+  | 'notebooks'
+  | 'data'
+  | 'backups'
+  | 'users';
 export const useUI = create<{
   selected: string | null;
   filter: string;
@@ -234,6 +240,37 @@ export class Workspace {
   }
   get sections() {
     return this.space.doc.getMap<Section>('sections');
+  }
+  /**
+   * Ручной порядок книжек и подразделов: отдельная карта id → позиция, чтобы
+   * перестановка не затирала одновременную правку названия на другом устройстве.
+   * Без позиции — в конец, в порядке создания.
+   */
+  private get orderMap() {
+    return this.space.doc.getMap<number>('order');
+  }
+  private sorted<T extends { id: string }>(items: T[]): T[] {
+    const order = this.orderMap;
+    return items
+      .map((item, index) => ({ item, index, rank: order.get(item.id) ?? Infinity }))
+      .sort((a, b) => (a.rank === b.rank ? a.index - b.index : a.rank - b.rank))
+      .map((entry) => entry.item);
+  }
+  orderedNotebooks(): Notebook[] {
+    return this.sorted([...this.notebooks.values()]);
+  }
+  /** Подразделы в ручном порядке (внутри каждой книжки). */
+  orderedSections(notebookId?: string): Section[] {
+    const all = [...this.sections.values()];
+    return this.sorted(notebookId ? all.filter((s) => s.notebookId === notebookId) : all);
+  }
+  setOrder(ids: string[]) {
+    const order = this.orderMap;
+    this.space.doc.transact(() => ids.forEach((id, index) => order.set(id, index)));
+  }
+  forgetOrder(...ids: string[]) {
+    const order = this.orderMap;
+    for (const id of ids) order.delete(id);
   }
   private get noteMap() {
     return this.space.doc.getMap<StoredNote>('notes');

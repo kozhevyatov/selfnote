@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Copy, Trash2, Users, X } from 'lucide-react';
 import { api } from './api';
-import { copyInvite, type InviteRow } from './Invites';
+import { copyInvite, InviteLinkField, type InviteRow } from './Invites';
 import type { Workspace } from './store';
 
 interface Member {
@@ -28,6 +28,8 @@ export function MembersDialog({
   const [loading, setLoading] = useState(true);
   const [invites, setInvites] = useState<InviteRow[]>([]);
   const [notice, setNotice] = useState('');
+  /** Ссылка на регистрацию, показанная под формой (буфер обмена может быть недоступен). */
+  const [inviteToken, setInviteToken] = useState<string | null>(null);
   const toast = (message: string) => setNotice(message);
   const reload = async () => {
     setMembers(await api<Member[]>(`/api/notes/${id}/members`));
@@ -50,6 +52,7 @@ export function MembersDialog({
     setBusy(true);
     setError('');
     setNotice('');
+    setInviteToken(null);
     try {
       await action();
       await reload();
@@ -93,9 +96,10 @@ export function MembersDialog({
               });
               setEmail('');
               if (result.invite) {
-                await copyInvite(result.invite.token, toast);
+                setInviteToken(result.invite.token);
+                const copied = await copyInvite(result.invite.token, toast, { quiet: true });
                 setNotice(
-                  `У ${result.invite.email} ещё нет аккаунта. Ссылка на регистрацию скопирована — отправьте её; после регистрации доступ к заметке появится сам.`,
+                  `У ${result.invite.email} ещё нет аккаунта. ${copied ? 'Ссылка на регистрацию скопирована' : 'Вот ссылка на регистрацию'} — отправьте её; после регистрации доступ к заметке появится сам.`,
                 );
               }
             });
@@ -135,6 +139,7 @@ export function MembersDialog({
             {notice}
           </p>
         )}
+        {inviteToken && <InviteLinkField token={inviteToken} toast={toast} autoSelect />}
         <h3>Участники</h3>
         <p className="small muted">
           Вы — владелец. Только вы управляете участниками, публичными ссылками и удалением заметки.
@@ -157,7 +162,13 @@ export function MembersDialog({
                 className="icon-button"
                 aria-label="Скопировать ссылку-приглашение"
                 title="Скопировать ссылку"
-                onClick={() => void copyInvite(invite.token, toast)}
+                onClick={() =>
+                  void copyInvite(invite.token, toast, { quiet: true }).then((ok) => {
+                    if (ok) return;
+                    setInviteToken(invite.token);
+                    setNotice(`Ссылка для ${invite.email} — выделите и скопируйте её.`);
+                  })
+                }
               >
                 <Copy size={16} />
               </button>
