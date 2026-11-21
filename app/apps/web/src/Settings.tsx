@@ -437,12 +437,21 @@ interface AdminUser {
   email: string;
   role: string;
   created_at: string;
+  blocked_at: string | null;
 }
 function UsersSettings({ me, toast }: { me: User; toast: (message: string) => void }) {
   const [state, setState] = useState<{ users: AdminUser[]; registration: string } | null>(null);
   const [failed, setFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [reset, setReset] = useState<{ id: string; password: string } | null>(null);
+  /** Удаление: администратор вводит почту пользователя для подтверждения. */
+  const [removal, setRemoval] = useState<{ id: string; confirm: string } | null>(null);
+  const patchUser = (id: string, patch: Partial<AdminUser>) =>
+    setState((current) =>
+      current
+        ? { ...current, users: current.users.map((x) => (x.id === id ? { ...x, ...patch } : x)) }
+        : current,
+    );
   const empty = { name: '', email: '', password: '', role: 'user' };
   const [form, setForm] = useState(empty);
   const load = () =>
@@ -524,13 +533,14 @@ function UsersSettings({ me, toast }: { me: User; toast: (message: string) => vo
         </h2>
         <div className="user-list">
           {state.users.map((u) => (
-            <div key={u.id} className="user-row">
+            <div key={u.id} className={`user-row ${u.blocked_at ? 'blocked' : ''}`}>
               <div className="user-main">
                 <span className="avatar">{initials(u.name)}</span>
                 <span className="user-text">
                   <strong>
                     {u.name}
                     {u.id === me.id && <b className="session-current">вы</b>}
+                    {u.blocked_at && <b className="user-blocked">заблокирован</b>}
                   </strong>
                   <small>
                     {u.email} · с {new Date(u.created_at).toLocaleDateString('ru')}
@@ -560,14 +570,99 @@ function UsersSettings({ me, toast }: { me: User; toast: (message: string) => vo
                   <option value="admin">Администратор</option>
                 </select>
                 {u.id !== me.id && (
-                  <button
-                    className="soft-button"
-                    onClick={() => setReset(reset?.id === u.id ? null : { id: u.id, password: '' })}
-                  >
-                    Пароль
-                  </button>
+                  <>
+                    <button
+                      className="soft-button"
+                      onClick={() => {
+                        setRemoval(null);
+                        setReset(reset?.id === u.id ? null : { id: u.id, password: '' });
+                      }}
+                    >
+                      Пароль
+                    </button>
+                    <button
+                      className="soft-button"
+                      disabled={busy}
+                      title={
+                        u.blocked_at
+                          ? 'Вернуть доступ к аккаунту'
+                          : 'Запретить вход; заметки сохранятся, но станут недоступны и другим'
+                      }
+                      onClick={() => {
+                        const blocked = !u.blocked_at;
+                        if (
+                          blocked &&
+                          !window.confirm(
+                            `Заблокировать ${u.name}? Все его входы завершатся, а общие заметки, гостевые и публичные ссылки перестанут открываться до разблокировки.`,
+                          )
+                        )
+                          return;
+                        void run(async () => {
+                          const result = await api<{ blocked_at: string | null }>(
+                            `/api/admin/users/${u.id}`,
+                            { method: 'PATCH', body: JSON.stringify({ blocked }) },
+                          );
+                          patchUser(u.id, { blocked_at: result.blocked_at });
+                          toast(blocked ? `${u.name} заблокирован` : `${u.name} разблокирован`);
+                        });
+                      }}
+                    >
+                      {u.blocked_at ? 'Разблокировать' : 'Заблокировать'}
+                    </button>
+                    <button
+                      className="soft-button danger-text"
+                      onClick={() => {
+                        setReset(null);
+                        setRemoval(removal?.id === u.id ? null : { id: u.id, confirm: '' });
+                      }}
+                    >
+                      Удалить
+                    </button>
+                  </>
                 )}
               </div>
+              {removal?.id === u.id && (
+                <form
+                  className="user-reset user-remove"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void run(async () => {
+                      const result = await api<{ notes: number }>(`/api/admin/users/${u.id}`, {
+                        method: 'DELETE',
+                        body: JSON.stringify({ confirm: removal.confirm }),
+                      });
+                      setRemoval(null);
+                      setState((current) =>
+                        current
+                          ? { ...current, users: current.users.filter((x) => x.id !== u.id) }
+                          : current,
+                      );
+                      toast(`${u.name} удалён вместе с заметками: ${result.notes}`);
+                    });
+                  }}
+                >
+                  <p className="small">
+                    Удалятся аккаунт, все заметки, история, картинки, публичные и гостевые ссылки
+                    пользователя. Отменить нельзя — сначала сделайте резервную копию. Чтобы
+                    подтвердить, введите почту <strong>{u.email}</strong>.
+                  </p>
+                  <input
+                    type="email"
+                    autoComplete="off"
+                    placeholder={u.email}
+                    aria-label={`Почта ${u.name} для подтверждения`}
+                    value={removal.confirm}
+                    onChange={(e) => setRemoval({ id: u.id, confirm: e.target.value })}
+                    autoFocus
+                  />
+                  <button
+                    className="danger"
+                    disabled={busy || removal.confirm.trim().toLowerCase() !== u.email}
+                  >
+                    Удалить навсегда
+                  </button>
+                </form>
+              )}
               {reset?.id === u.id && (
                 <form
                   className="user-reset"

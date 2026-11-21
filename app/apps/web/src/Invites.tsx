@@ -65,18 +65,22 @@ export function InviteLinkField({
   token,
   toast,
   autoSelect = false,
+  url = inviteLink(token),
+  label = 'Ссылка-приглашение',
 }: {
   token: string;
   toast: (message: string) => void;
   autoSelect?: boolean;
+  /** Другая ссылка (гостевая) вместо приглашения на регистрацию. */
+  url?: string;
+  label?: string;
 }) {
-  const url = inviteLink(token);
   return (
     <div className="share-created invite-link">
       <input
         readOnly
         value={url}
-        aria-label="Ссылка-приглашение"
+        aria-label={label}
         autoFocus={autoSelect}
         onFocus={(e) => e.target.select()}
         onClick={(e) => e.currentTarget.select()}
@@ -86,7 +90,11 @@ export function InviteLinkField({
         className="icon-button"
         aria-label="Скопировать ссылку"
         title="Скопировать ссылку"
-        onClick={() => void copyInvite(token, toast)}
+        onClick={() =>
+          void copyText(url).then((ok) =>
+            toast(ok ? 'Ссылка скопирована' : 'Не удалось скопировать — выделите ссылку вручную'),
+          )
+        }
       >
         <Copy size={16} />
       </button>

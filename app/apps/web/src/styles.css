@@ -2879,3 +2879,117 @@ small,
     margin-left: 12px;
   }
 }
+
+/* Гостевые ссылки в окне «Совместный доступ». */
+.guest-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 12px;
+}
+.guest-links {
+  margin-top: 4px;
+}
+.guest-pin-field {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.guest-pin-field input {
+  flex: 1;
+  letter-spacing: 0.12em;
+}
+.guest-pin {
+  font-size: 16px;
+  letter-spacing: 0.14em;
+}
+.share-created .share-created {
+  flex-basis: 100%;
+  margin: 0;
+  padding: 0;
+}
+.member-row .error {
+  color: var(--danger);
+}
+
+/* Гостевая страница /g/<токен>. */
+.guest-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  background: var(--panel);
+}
+.guest-shell.empty {
+  align-items: center;
+  justify-content: center;
+}
+.guest-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px 10px 24px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.guest-header .small {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+.guest-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: var(--accent-text);
+}
+.guest-main {
+  padding-top: 16px;
+}
+.guest-main .document {
+  padding-top: 8px;
+}
+@media (max-width: 760px) {
+  .guest-header {
+    padding-left: 16px;
+  }
+  .guest-main {
+    padding-inline: 16px;
+  }
+}
+
+/* Админка: заблокированные пользователи и удаление. */
+.user-blocked {
+  margin-left: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  border-radius: 999px;
+  padding: 2px 10px;
+  white-space: nowrap;
+}
+.user-row.blocked .avatar,
+.user-row.blocked .user-text small {
+  opacity: 0.6;
+}
+.user-remove {
+  flex-wrap: wrap;
+  align-items: center;
+}
+.user-remove p {
+  flex-basis: 100%;
+  margin: 0 0 4px;
+  line-height: 1.5;
+}
+.user-remove input {
+  flex: 1;
+  min-width: 200px;
+}
+@media (max-width: 760px) {
+  .user-remove {
+    margin-left: 0;
+  }
+}

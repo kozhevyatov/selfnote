@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Copy, Trash2, Users, X } from 'lucide-react';
+import { Copy, KeyRound, Link2, RotateCcw, Trash2, Unlock, Users, X } from 'lucide-react';
 import { api } from './api';
-import { copyInvite, InviteLinkField, type InviteRow } from './Invites';
+import { copyInvite, copyText, InviteLinkField, type InviteRow } from './Invites';
 import type { Workspace } from './store';
 
 interface Member {
@@ -82,7 +82,8 @@ export function MembersDialog({
         </div>
         <p className="muted small">
           Пригласите пользователя SelfNote по адресу его аккаунта — приглашение появится у него в
-          разделе «Общие». Если аккаунта нет, получите ссылку на регистрацию.
+          разделе «Общие». Если аккаунта нет, получите ссылку на регистрацию — или создайте гостевую
+          ссылку с PIN ниже.
         </p>
         <form
           className="share-form"
@@ -225,6 +226,7 @@ export function MembersDialog({
             </div>
           ))}
         </div>
+        <GuestLinks workspace={workspace} id={id} />
       </section>
     </div>
   );
@@ -312,4 +314,339 @@ export function NotePresence({
       Сейчас в заметке: {names.join(', ')}
     </span>
   ) : null;
+}
+
+interface GuestLink {
+  id: string;
+  token: string;
+  role: 'editor' | 'reader';
+  label: string | null;
+  expires_at: string | null;
+  max_devices: number | null;
+  locked_until: string | null;
+  created_at: string;
+  last_used_at: string | null;
+  expired: boolean;
+  devices: { id: string; name: string; last_seen_at: string }[];
+}
+export const guestLink = (token: string) => `${location.origin}/g/${token}`;
+function randomPin() {
+  const values = crypto.getRandomValues(new Uint32Array(6));
+  return Array.from(values, (v) => String(v % 10)).join('');
+}
+const shortDate = (iso: string) =>
+  new Date(iso).toLocaleDateString('ru', { day: 'numeric', month: 'short' });
+/** Гостевые ссылки: доступ без аккаунта по персональной ссылке и PIN. */
+function GuestLinks({ workspace, id }: { workspace: Workspace; id: string }) {
+  const [links, setLinks] = useState<GuestLink[] | null>(null);
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState({
+    label: '',
+    pin: randomPin(),
+    role: 'editor' as GuestLink['role'],
+    expiresInDays: '7',
+    maxDevices: '3',
+  });
+  const [created, setCreated] = useState<{ token: string; pin: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const load = () =>
+    api<GuestLink[]>(`/api/notes/${id}/guests`)
+      .then(setLinks)
+      .catch((e) => {
+        setLinks([]);
+        setError((e as Error).message);
+      });
+  useEffect(() => {
+    void load();
+    // список устройств и блокировок меняется, пока окно открыто
+    const timer = setInterval(() => void load(), 15000);
+    return () => clearInterval(timer);
+  }, [id]);
+  const run = async (action: () => Promise<unknown>) => {
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      await action();
+      await load();
+      await workspace.refreshCollaboration();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const describe = (link: GuestLink) => {
+    const parts = [link.role === 'reader' ? 'читатель' : 'редактор'];
+    parts.push(
+      link.expired
+        ? 'срок истёк'
+        : link.expires_at
+          ? `до ${shortDate(link.expires_at)}`
+          : 'бессрочно',
+    );
+    parts.push(
+      `устройств ${link.devices.length}${link.max_devices ? ` из ${link.max_devices}` : ''}`,
+    );
+    return parts.join(' · ');
+  };
+  return (
+    <>
+      <h3>Гостевые ссылки</h3>
+      <p className="small muted">
+        Для тех, у кого нет аккаунта: персональная ссылка и PIN. Гость вводит имя — оно видно в
+        заметке и в истории версий. Пять неверных PIN блокируют ссылку на час. Картинки гости
+        добавлять не могут.
+      </p>
+      {created && (
+        <div className="share-created">
+          <InviteLinkField
+            token={created.token}
+            url={guestLink(created.token)}
+            label="Гостевая ссылка"
+            toast={setNotice}
+            autoSelect
+          />
+          <p className="small">
+            PIN: <strong className="guest-pin">{created.pin}</strong> — передайте его отдельно от
+            ссылки. Позже PIN посмотреть нельзя, только создать новую ссылку.
+          </p>
+        </div>
+      )}
+      {open ? (
+        <form
+          className="share-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void run(async () => {
+              await workspace.whenSynced(id);
+              const link = await api<GuestLink>(`/api/notes/${id}/guests`, {
+                method: 'POST',
+                body: JSON.stringify({
+                  role: form.role,
+                  pin: form.pin.trim(),
+                  label: form.label.trim() || undefined,
+                  expiresInDays: form.expiresInDays ? Number(form.expiresInDays) : null,
+                  maxDevices: form.maxDevices ? Number(form.maxDevices) : null,
+                }),
+              });
+              setCreated({ token: link.token, pin: form.pin.trim() });
+              const copied = await copyText(guestLink(link.token));
+              setNotice(copied ? 'Ссылка скопирована. Не забудьте PIN' : '');
+              setForm({ ...form, label: '', pin: randomPin() });
+              setOpen(false);
+            });
+          }}
+        >
+          <label>
+            Для кого (видно только вам)
+            <input
+              value={form.label}
+              maxLength={120}
+              onChange={(e) => setForm({ ...form, label: e.target.value })}
+              placeholder="Например, Дима"
+            />
+          </label>
+          <label>
+            PIN — от 6 символов
+            <span className="guest-pin-field">
+              <input
+                required
+                minLength={6}
+                maxLength={32}
+                pattern="\S{6,32}"
+                value={form.pin}
+                onChange={(e) => setForm({ ...form, pin: e.target.value })}
+              />
+              <button
+                type="button"
+                className="icon-button"
+                title="Новый PIN"
+                aria-label="Сгенерировать PIN"
+                onClick={() => setForm({ ...form, pin: randomPin() })}
+              >
+                <RotateCcw size={16} />
+              </button>
+            </span>
+          </label>
+          <label>
+            Доступ
+            <select
+              value={form.role}
+              onChange={(e) => setForm({ ...form, role: e.target.value as GuestLink['role'] })}
+            >
+              <option value="editor">Редактор — текст и задачи</option>
+              <option value="reader">Читатель — только просмотр</option>
+            </select>
+          </label>
+          <label>
+            Срок действия
+            <select
+              value={form.expiresInDays}
+              onChange={(e) => setForm({ ...form, expiresInDays: e.target.value })}
+            >
+              <option value="1">1 день</option>
+              <option value="7">7 дней</option>
+              <option value="30">30 дней</option>
+              <option value="">Бессрочно</option>
+            </select>
+          </label>
+          <label>
+            Устройств на ссылку
+            <select
+              value={form.maxDevices}
+              onChange={(e) => setForm({ ...form, maxDevices: e.target.value })}
+            >
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="5">5</option>
+              <option value="">Без ограничения</option>
+            </select>
+          </label>
+          <div className="actions">
+            <button type="button" onClick={() => setOpen(false)}>
+              Отмена
+            </button>
+            <button className="primary" disabled={busy || form.pin.trim().length < 6}>
+              <Link2 size={16} />
+              Создать ссылку
+            </button>
+          </div>
+        </form>
+      ) : (
+        <button
+          type="button"
+          className="soft-button guest-add"
+          onClick={() => {
+            setCreated(null);
+            setOpen(true);
+          }}
+        >
+          <KeyRound size={16} />
+          Новая гостевая ссылка
+        </button>
+      )}
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+      {notice && (
+        <p className="small muted" role="status">
+          {notice}
+        </p>
+      )}
+      {links && links.length > 0 && (
+        <div className="members-list guest-links">
+          {links.map((link) => (
+            <div className="member-row" key={link.id}>
+              <div>
+                <strong>{link.label || 'Гостевая ссылка'}</strong>
+                <span className="small muted">{describe(link)}</span>
+                {link.devices.length > 0 && (
+                  <span className="small muted">
+                    Вошли: {link.devices.map((d) => d.name).join(', ')}
+                  </span>
+                )}
+                {link.locked_until && (
+                  <span className="small error">
+                    Заблокирована после неверных PIN до{' '}
+                    {new Date(link.locked_until).toLocaleTimeString('ru', {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                  </span>
+                )}
+              </div>
+              <select
+                aria-label={`Роль: ${link.label || 'гостевая ссылка'}`}
+                value={link.role}
+                disabled={busy}
+                onChange={(e) =>
+                  void run(() =>
+                    api(`/api/guests/${link.id}`, {
+                      method: 'PATCH',
+                      body: JSON.stringify({ role: e.target.value }),
+                    }),
+                  )
+                }
+              >
+                <option value="editor">Редактор</option>
+                <option value="reader">Читатель</option>
+              </select>
+              <button
+                className="icon-button"
+                aria-label="Скопировать гостевую ссылку"
+                title="Скопировать ссылку"
+                onClick={() =>
+                  void copyText(guestLink(link.token)).then((ok) =>
+                    setNotice(
+                      ok
+                        ? 'Ссылка скопирована'
+                        : 'Не удалось скопировать: ' + guestLink(link.token),
+                    ),
+                  )
+                }
+              >
+                <Copy size={16} />
+              </button>
+              {link.locked_until && (
+                <button
+                  className="icon-button"
+                  aria-label="Снять блокировку"
+                  title="Снять блокировку"
+                  disabled={busy}
+                  onClick={() =>
+                    void run(() =>
+                      api(`/api/guests/${link.id}`, {
+                        method: 'PATCH',
+                        body: JSON.stringify({ unlock: true }),
+                      }),
+                    )
+                  }
+                >
+                  <Unlock size={16} />
+                </button>
+              )}
+              {link.devices.length > 0 && (
+                <button
+                  className="danger-text"
+                  disabled={busy}
+                  title="Отключить все устройства, вошедшие по ссылке"
+                  onClick={() => {
+                    if (
+                      window.confirm('Отключить все устройства? Гостям придётся снова ввести PIN.')
+                    )
+                      void run(() =>
+                        api(`/api/guests/${link.id}`, {
+                          method: 'PATCH',
+                          body: JSON.stringify({ resetDevices: true }),
+                        }),
+                      );
+                  }}
+                >
+                  Сбросить устройства
+                </button>
+              )}
+              <button
+                className="icon-button"
+                aria-label="Отозвать гостевую ссылку"
+                title="Отозвать"
+                disabled={busy}
+                onClick={() => {
+                  if (window.confirm('Отозвать ссылку? Гости сразу потеряют доступ.'))
+                    void run(() => api(`/api/guests/${link.id}`, { method: 'DELETE' }));
+                }}
+              >
+                <Trash2 size={16} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  );
 }

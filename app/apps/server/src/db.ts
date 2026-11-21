@@ -20,6 +20,35 @@ export type Config =
       password: string;
     };
 interface Database {
+  /** Гостевые ссылки совместного редактирования: персональная ссылка + PIN. */
+  guest_links: {
+    id: string;
+    token: string;
+    note_id: string;
+    owner_id: string;
+    role: string;
+    label: string | null;
+    pin_hash: string;
+    expires_at: string | null;
+    max_devices: number | null;
+    failed_attempts: Generated<number>;
+    locked_until: string | null;
+    created_at: string;
+    last_used_at: string | null;
+    /** Ссылка отозвана; запись остаётся, чтобы имена гостей в истории версий сохранились. */
+    revoked_at: string | null;
+  };
+  /** Устройства гостя: одна запись на вход по ссылке (имя гостя идёт в историю версий). */
+  guest_sessions: {
+    id: string;
+    link_id: string;
+    name: string;
+    token_hash: string;
+    created_at: string;
+    last_seen_at: string;
+    /** Устройство отключено (выход, сброс устройств владельцем). */
+    ended_at: string | null;
+  };
   invites: {
     id: string;
     token: string;
@@ -51,6 +80,8 @@ interface Database {
     password_hash: string;
     role: string;
     created_at: string;
+    /** Аккаунт заблокирован администратором: вход и синхронизация запрещены. */
+    blocked_at: Generated<string | null>;
   };
   sessions: {
     id: string;
@@ -138,6 +169,56 @@ export async function openDatabase(config: Config): Promise<DB> {
     db: conn,
     provider: {
       getMigrations: async () => ({
+        '010_user_blocking': {
+          up: async (d: Kysely<unknown>) => {
+            await d.schema.alterTable('users').addColumn('blocked_at', 'varchar(30)').execute();
+          },
+        },
+        '009_guest_links': {
+          up: async (d: Kysely<unknown>) => {
+            await d.schema
+              .createTable('guest_links')
+              .addColumn('id', 'varchar(36)', (c) => c.primaryKey())
+              .addColumn('token', 'varchar(64)', (c) => c.notNull().unique())
+              .addColumn('note_id', 'varchar(36)', (c) => c.notNull())
+              .addColumn('owner_id', 'varchar(36)', (c) =>
+                c.notNull().references('users.id').onDelete('cascade'),
+              )
+              .addColumn('role', 'varchar(20)', (c) => c.notNull())
+              .addColumn('label', 'varchar(120)')
+              .addColumn('pin_hash', 'text', (c) => c.notNull())
+              .addColumn('expires_at', 'varchar(30)')
+              .addColumn('max_devices', 'integer')
+              .addColumn('failed_attempts', 'integer', (c) => c.notNull().defaultTo(0))
+              .addColumn('locked_until', 'varchar(30)')
+              .addColumn('created_at', 'varchar(30)', (c) => c.notNull())
+              .addColumn('last_used_at', 'varchar(30)')
+              .addColumn('revoked_at', 'varchar(30)')
+              .execute();
+            await d.schema
+              .createIndex('guest_links_note')
+              .on('guest_links')
+              .column('note_id')
+              .execute();
+            await d.schema
+              .createTable('guest_sessions')
+              .addColumn('id', 'varchar(36)', (c) => c.primaryKey())
+              .addColumn('link_id', 'varchar(36)', (c) =>
+                c.notNull().references('guest_links.id').onDelete('cascade'),
+              )
+              .addColumn('name', 'varchar(120)', (c) => c.notNull())
+              .addColumn('token_hash', 'varchar(64)', (c) => c.notNull().unique())
+              .addColumn('created_at', 'varchar(30)', (c) => c.notNull())
+              .addColumn('last_seen_at', 'varchar(30)', (c) => c.notNull())
+              .addColumn('ended_at', 'varchar(30)')
+              .execute();
+            await d.schema
+              .createIndex('guest_sessions_link')
+              .on('guest_sessions')
+              .column('link_id')
+              .execute();
+          },
+        },
         '008_invites': {
           up: async (d: Kysely<unknown>) => {
             await d.schema

@@ -944,6 +944,186 @@ try {
   assert.equal((await request(`/api/invites/${revokedInvite.token}`)).status, 410);
   assert.equal((await setMode('open')).status, 200);
   console.log('✓ Регистрация по приглашению: ссылка в заметку, режим «по приглашениям», отзыв');
+
+  // Гости: персональная ссылка + PIN, лимит устройств, роль, блокировка PIN, отзыв.
+  const guestsUrl = `/api/notes/${collabId}/guests`;
+  const guestInput = { role: 'editor', pin: '246810', expiresInDays: 7, maxDevices: 1 };
+  assert.equal(
+    (await request(guestsUrl, { ...guestInput, pin: '12345' }, owner.accessToken)).status,
+    400,
+  );
+  assert.equal((await request(guestsUrl, guestInput, other.accessToken)).status, 403);
+  r = await request(guestsUrl, { ...guestInput, label: 'Дима' }, owner.accessToken);
+  const guestLinkText = await r.text();
+  assert.equal(r.status, 200, guestLinkText);
+  const guestLink = JSON.parse(guestLinkText);
+  assert.equal(guestLink.pin_hash, undefined);
+  const gUrl = `/api/guest/${guestLink.token}`;
+  const guestInfo = await (await request(gUrl)).json();
+  assert.equal(guestInfo.role, 'editor');
+  assert.equal(guestInfo.title, undefined, 'название заметки не раскрывается до PIN');
+  assert.equal((await request(`${gUrl}/login`, { name: 'Дима', pin: '000000' })).status, 401);
+  r = await request(`${gUrl}/login`, { name: 'Дима', pin: '246810' });
+  assert.equal(r.status, 200);
+  const guest = await r.json();
+  const guestCookie = r.headers.get('set-cookie').split(';')[0];
+  assert.equal(guest.note.id, collabId);
+  assert.equal((await request('/api/tasks', undefined, guest.accessToken)).status, 401);
+  assert.equal(
+    (await request(`${gUrl}/login`, { name: 'Второй', pin: '246810' })).status,
+    403,
+    'лимит устройств',
+  );
+  assert.equal((await request(`${gUrl}/refresh`, {}, undefined, guestCookie)).status, 200);
+  const guestClient = connect(`note:${collabId}`, guest.accessToken);
+  await waitFor(() => guestClient.provider.isSynced, 'гость подключился');
+  const gp = new Y.XmlElement('paragraph'),
+    gt = new Y.XmlText();
+  gt.insert(0, 'Правка гостя');
+  gp.insert(0, [gt]);
+  guestClient.doc.getXmlFragment('content').push([gp]);
+  await waitFor(
+    () => extractDocument(co.doc).plainText.includes('Правка гостя'),
+    'гость меняет текст владельца',
+  );
+  const guestSpace = connect(`space:${owner.user.id}`, guest.accessToken);
+  let guestSpaceDenied = false;
+  guestSpace.provider.on('authenticationFailed', () => {
+    guestSpaceDenied = true;
+  });
+  await waitFor(() => guestSpaceDenied, 'гость не открывает пространство владельца');
+  assert.equal(
+    (
+      await request(
+        `/api/guests/${guestLink.id}`,
+        { role: 'reader' },
+        owner.accessToken,
+        undefined,
+        'PATCH',
+      )
+    ).status,
+    200,
+  );
+  await waitFor(() => guestClient.provider.authorizedScope === 'readonly', 'гость стал читателем');
+  let guestList = await (await request(guestsUrl, undefined, owner.accessToken)).json();
+  assert.equal(guestList[0].devices[0].name, 'Дима');
+  assert.deepEqual(
+    (
+      await (await request('/api/collaboration', undefined, owner.accessToken)).json()
+    ).owned.includes(collabId),
+    true,
+  );
+  let guestRevoked = false;
+  guestClient.provider.on('authenticationFailed', () => {
+    guestRevoked = true;
+  });
+  assert.equal(
+    (
+      await request(
+        `/api/guests/${guestLink.id}`,
+        undefined,
+        owner.accessToken,
+        undefined,
+        'DELETE',
+      )
+    ).status,
+    200,
+  );
+  await waitFor(() => guestRevoked, 'отзыв ссылки отключает гостя');
+  assert.equal((await request(`${gUrl}/refresh`, {}, undefined, guestCookie)).status, 410);
+  // пять неверных PIN блокируют ссылку на час, владелец может снять блокировку
+  r = await request(guestsUrl, { ...guestInput, maxDevices: null }, owner.accessToken);
+  const lockLink = await r.json();
+  const lockUrl = `/api/guest/${lockLink.token}/login`;
+  for (let i = 0; i < 4; i++)
+    assert.equal((await request(lockUrl, { name: 'Взломщик', pin: `00000${i}` })).status, 401);
+  assert.equal((await request(lockUrl, { name: 'Взломщик', pin: '000009' })).status, 423);
+  assert.equal((await request(lockUrl, { name: 'Гость', pin: '246810' })).status, 423);
+  guestList = await (await request(guestsUrl, undefined, owner.accessToken)).json();
+  assert.ok(guestList.find((l) => l.id === lockLink.id).locked_until);
+  assert.equal(
+    (
+      await request(
+        `/api/guests/${lockLink.id}`,
+        { unlock: true },
+        owner.accessToken,
+        undefined,
+        'PATCH',
+      )
+    ).status,
+    200,
+  );
+  assert.equal((await request(lockUrl, { name: 'Гость', pin: '246810' })).status, 200);
+  console.log('✓ Гости: ссылка + PIN, лимит устройств, роль, блокировка после 5 ошибок, отзыв');
+
+  // Админка: блокировка и удаление пользователя.
+  const victim = { name: 'Временный', email: 'temp@example.test', password: 'temp-password-2026' };
+  r = await request('/api/admin/users', { ...victim, role: 'user' }, owner.accessToken);
+  assert.equal(r.status, 200);
+  const victimId = (await r.json()).id;
+  r = await request('/api/auth/login', { email: victim.email, password: victim.password });
+  const victimAuth = await r.json();
+  const victimCookie = r.headers.get('set-cookie').split(';')[0];
+  const victimNote = randomUUID();
+  const vn = connect(`note:${victimNote}`, victimAuth.accessToken);
+  await waitFor(() => vn.provider.isSynced, 'заметка удаляемого пользователя');
+  const vp = new Y.XmlElement('paragraph'),
+    vt = new Y.XmlText();
+  vt.insert(0, 'Будет удалено');
+  vp.insert(0, [vt]);
+  vn.doc.getXmlFragment('content').insert(0, [vp]);
+  await waitFor(
+    async () =>
+      (await request(`/api/notes/${victimNote}/versions`, undefined, victimAuth.accessToken))
+        .status === 200,
+    'заметка сохранена на сервере',
+  );
+  const patchUser = (id, body) =>
+    request(`/api/admin/users/${id}`, body, owner.accessToken, undefined, 'PATCH');
+  let victimDropped = false;
+  vn.provider.on('authenticationFailed', () => {
+    victimDropped = true;
+  });
+  assert.equal((await patchUser(owner.user.id, { blocked: true })).status, 400);
+  assert.equal((await patchUser(victimId, { blocked: true })).status, 200);
+  assert.equal((await request('/api/auth/refresh', {}, undefined, victimCookie)).status, 401);
+  assert.equal(
+    (await request('/api/auth/login', { email: victim.email, password: victim.password })).status,
+    403,
+  );
+  await waitFor(() => victimDropped, 'заблокированный пользователь отключён');
+  const users = await (await request('/api/admin/users', undefined, owner.accessToken)).json();
+  assert.ok(users.users.find((u) => u.id === victimId).blocked_at);
+  assert.equal((await patchUser(victimId, { blocked: false })).status, 200);
+  assert.equal(
+    (await request('/api/auth/login', { email: victim.email, password: victim.password })).status,
+    200,
+  );
+  const removeUser = (id, confirm) =>
+    request(`/api/admin/users/${id}`, { confirm }, owner.accessToken, undefined, 'DELETE');
+  assert.equal((await removeUser(victimId, 'wrong@example.test')).status, 400);
+  assert.equal((await removeUser(owner.user.id, setup.email)).status, 400);
+  r = await removeUser(victimId, victim.email);
+  assert.equal(r.status, 200, await r.clone().text());
+  assert.equal((await r.json()).notes, 1);
+  vn.provider.destroy();
+  vn.socket.destroy();
+  const afterDelete = new SQLite(path.join(data, 'selfnote.sqlite'), { readonly: true });
+  assert.equal(afterDelete.prepare('select id from users where id = ?').get(victimId), undefined);
+  assert.equal(
+    afterDelete.prepare('select name from yjs_documents where owner_id = ?').get(victimId),
+    undefined,
+  );
+  assert.ok(
+    afterDelete.prepare('select note_id from purged_notes where note_id = ?').get(victimNote),
+  );
+  afterDelete.close();
+  assert.equal(
+    (await request('/api/auth/login', { email: victim.email, password: victim.password })).status,
+    401,
+  );
+  console.log('✓ Админка: блокировка, разблокировка, удаление пользователя с данными');
+
   spaceLive.doc.transact(() => {
     spaceLive.doc.getMap('purged').set(collabId, true);
     spaceLive.doc.getMap('notes').delete(collabId);

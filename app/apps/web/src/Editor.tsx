@@ -288,7 +288,9 @@ function ImageView({ node, extension }: NodeViewProps) {
   useEffect(() => {
     let active = true;
     let objectUrl = '';
-    void imageUrl(node.attrs.src, extension.options.userId)
+    const load: (src: string) => Promise<string> =
+      extension.options.load ?? ((src) => imageUrl(src, extension.options.userId));
+    void load(node.attrs.src)
       .then((value) => {
         objectUrl = value;
         if (active) setUrl(value);
@@ -299,7 +301,7 @@ function ImageView({ node, extension }: NodeViewProps) {
       active = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [node.attrs.src, extension.options.userId]);
+  }, [node.attrs.src, extension.options.userId, extension.options.load]);
   return (
     <NodeViewWrapper className="note-image" contentEditable={false}>
       {url ? (
@@ -312,6 +314,8 @@ function ImageView({ node, extension }: NodeViewProps) {
 }
 const LocalImage = Image.extend<{
   userId: string;
+  /** Свой загрузчик картинок (гостевая страница): src → object URL. */
+  load: ((src: string) => Promise<string>) | null;
   inline: boolean;
   allowBase64: boolean;
   HTMLAttributes: Record<string, unknown>;
@@ -320,6 +324,7 @@ const LocalImage = Image.extend<{
     return {
       ...this.parent?.(),
       userId: '',
+      load: null,
       inline: false,
       allowBase64: false,
       HTMLAttributes: {},
@@ -489,103 +494,28 @@ function EditorBody({ workspace, id, doc }: { workspace: Workspace; id: string; 
   }
   if (!editor) return null;
   const hiddenTitle = Boolean(workspace.metadata.get(id)?.hideTitle);
-  const button = (label: string, Icon: typeof Bold, action: () => void, active?: boolean) => (
-    <button
-      key={label}
-      type="button"
-      title={label}
-      aria-label={label}
-      aria-pressed={active}
-      className={`icon-button ${active ? 'active' : ''}`}
-      onMouseDown={(e) => e.preventDefault()}
-      onClick={action}
-    >
-      <Icon size={18} />
-    </button>
-  );
   return (
     <>
       {editable && (
-        <div className="toolbar" data-selection={tick} role="toolbar" aria-label="Форматирование">
-          {button(
-            'Жирный',
-            Bold,
-            () => editor.chain().focus().toggleBold().run(),
-            editor.isActive('bold'),
-          )}
-          {button(
-            'Курсив',
-            Italic,
-            () => editor.chain().focus().toggleItalic().run(),
-            editor.isActive('italic'),
-          )}
-          {button(
-            'Зачёркнутый',
-            Strikethrough,
-            () => editor.chain().focus().toggleStrike().run(),
-            editor.isActive('strike'),
-          )}
-          {button(
-            'Скрытый текст',
-            EyeOff,
-            () => editor.chain().focus().toggleMark('spoiler').run(),
-            editor.isActive('spoiler'),
-          )}
-          <span className="toolbar-divider" />
-          {button(
-            'Заголовок 2',
-            Heading2,
-            () => editor.chain().focus().toggleHeading({ level: 2 }).run(),
-            editor.isActive('heading', { level: 2 }),
-          )}
-          {button(
-            'Заголовок 3',
-            Heading3,
-            () => editor.chain().focus().toggleHeading({ level: 3 }).run(),
-            editor.isActive('heading', { level: 3 }),
-          )}
-          {button(
-            'Маркированный список',
-            List,
-            () => editor.chain().focus().toggleBulletList().run(),
-            editor.isActive('bulletList'),
-          )}
-          {button(
-            'Нумерованный список',
-            ListOrdered,
-            () => editor.chain().focus().toggleOrderedList().run(),
-            editor.isActive('orderedList'),
-          )}
-          {button(
-            'Список задач',
-            ListTodo,
-            () => editor.chain().focus().toggleTaskList().run(),
-            editor.isActive('taskList'),
-          )}
-          <span className="toolbar-divider" />
-          {button(
-            'Ссылка',
-            Link,
-            () => setLink(editor.getAttributes('link').href || ''),
-            editor.isActive('link'),
-          )}
-          {button('Вставить изображение', ImagePlus, () => imageInput.current?.click())}
-          <input
-            ref={imageInput}
-            hidden
-            aria-label="Файл изображения"
-            type="file"
-            accept="image/*"
-            multiple
-            onChange={(e) => {
-              void addFiles([...(e.target.files || [])]);
-              e.target.value = '';
-            }}
-          />
-          {button('Отменить', Undo2, () => editor.chain().focus().undo().run())}
-          {button('Повторить', Redo2, () => editor.chain().focus().redo().run())}
-        </div>
+        <FormatToolbar
+          editor={editor}
+          tick={tick}
+          onLink={() => setLink(editor.getAttributes('link').href || '')}
+          onImage={() => imageInput.current?.click()}
+        />
       )}
+      <input
+        ref={imageInput}
+        hidden
+        aria-label="Файл изображения"
+        type="file"
+        accept="image/*"
+        multiple
+        onChange={(e) => {
+          void addFiles([...(e.target.files || [])]);
+          e.target.value = '';
+        }}
+      />
       <div className="document">
         <input
           className="note-title"
@@ -604,41 +534,251 @@ function EditorBody({ workspace, id, doc }: { workspace: Workspace; id: string; 
         <EditorContent editor={editor} />
         {editable && <p className="editor-hint">Напишите что-нибудь или начните список с «[ ]»</p>}
       </div>
-      {link !== null && (
-        <div className="modal-backdrop">
-          <form
-            className="modal"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (link && !/^https?:\/\//i.test(link) && !/^mailto:/i.test(link)) {
-                toast('Укажите ссылку с https:// или mailto:');
-                return;
-              }
-              if (link)
-                editor.chain().focus().extendMarkRange('link').setLink({ href: link }).run();
-              else editor.chain().focus().unsetLink().run();
-              setLink(null);
-            }}
-          >
-            <h2>Ссылка</h2>
-            <label>
-              Адрес
-              <input
-                autoFocus
-                value={link}
-                onChange={(e) => setLink(e.target.value)}
-                placeholder="https://"
-              />
-            </label>
-            <div className="actions">
-              <button type="button" onClick={() => setLink(null)}>
-                Отмена
-              </button>
-              <button className="primary">Применить</button>
-            </div>
-          </form>
-        </div>
+      {link !== null && <LinkDialog editor={editor} link={link} setLink={setLink} toast={toast} />}
+    </>
+  );
+}
+type TiptapEditor = NonNullable<ReturnType<typeof useEditor>>;
+/** Панель форматирования; без onImage кнопки вставки картинки нет (гостям загрузка запрещена). */
+function FormatToolbar({
+  editor,
+  tick,
+  onLink,
+  onImage,
+}: {
+  editor: TiptapEditor;
+  tick: number;
+  onLink: () => void;
+  onImage?: () => void;
+}) {
+  const button = (label: string, Icon: typeof Bold, action: () => void, active?: boolean) => (
+    <button
+      key={label}
+      type="button"
+      title={label}
+      aria-label={label}
+      aria-pressed={active}
+      className={`icon-button ${active ? 'active' : ''}`}
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={action}
+    >
+      <Icon size={18} />
+    </button>
+  );
+  return (
+    <div className="toolbar" data-selection={tick} role="toolbar" aria-label="Форматирование">
+      {button(
+        'Жирный',
+        Bold,
+        () => editor.chain().focus().toggleBold().run(),
+        editor.isActive('bold'),
       )}
+      {button(
+        'Курсив',
+        Italic,
+        () => editor.chain().focus().toggleItalic().run(),
+        editor.isActive('italic'),
+      )}
+      {button(
+        'Зачёркнутый',
+        Strikethrough,
+        () => editor.chain().focus().toggleStrike().run(),
+        editor.isActive('strike'),
+      )}
+      {button(
+        'Скрытый текст',
+        EyeOff,
+        () => editor.chain().focus().toggleMark('spoiler').run(),
+        editor.isActive('spoiler'),
+      )}
+      <span className="toolbar-divider" />
+      {button(
+        'Заголовок 2',
+        Heading2,
+        () => editor.chain().focus().toggleHeading({ level: 2 }).run(),
+        editor.isActive('heading', { level: 2 }),
+      )}
+      {button(
+        'Заголовок 3',
+        Heading3,
+        () => editor.chain().focus().toggleHeading({ level: 3 }).run(),
+        editor.isActive('heading', { level: 3 }),
+      )}
+      {button(
+        'Маркированный список',
+        List,
+        () => editor.chain().focus().toggleBulletList().run(),
+        editor.isActive('bulletList'),
+      )}
+      {button(
+        'Нумерованный список',
+        ListOrdered,
+        () => editor.chain().focus().toggleOrderedList().run(),
+        editor.isActive('orderedList'),
+      )}
+      {button(
+        'Список задач',
+        ListTodo,
+        () => editor.chain().focus().toggleTaskList().run(),
+        editor.isActive('taskList'),
+      )}
+      <span className="toolbar-divider" />
+      {button('Ссылка', Link, onLink, editor.isActive('link'))}
+      {onImage && button('Вставить изображение', ImagePlus, onImage)}
+      {button('Отменить', Undo2, () => editor.chain().focus().undo().run())}
+      {button('Повторить', Redo2, () => editor.chain().focus().redo().run())}
+    </div>
+  );
+}
+function LinkDialog({
+  editor,
+  link,
+  setLink,
+  toast,
+}: {
+  editor: TiptapEditor;
+  link: string;
+  setLink: (value: string | null) => void;
+  toast: (message: string) => void;
+}) {
+  return (
+    <div className="modal-backdrop">
+      <form
+        className="modal"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (link && !/^https?:\/\//i.test(link) && !/^mailto:/i.test(link)) {
+            toast('Укажите ссылку с https:// или mailto:');
+            return;
+          }
+          if (link) editor.chain().focus().extendMarkRange('link').setLink({ href: link }).run();
+          else editor.chain().focus().unsetLink().run();
+          setLink(null);
+        }}
+      >
+        <h2>Ссылка</h2>
+        <label>
+          Адрес
+          <input
+            autoFocus
+            value={link}
+            onChange={(e) => setLink(e.target.value)}
+            placeholder="https://"
+          />
+        </label>
+        <div className="actions">
+          <button type="button" onClick={() => setLink(null)}>
+            Отмена
+          </button>
+          <button className="primary">Применить</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/**
+ * Редактор гостевой страницы: тот же документ и схема, но без рабочего пространства.
+ * Заголовок и дата правки — в общей карте collaboration документа заметки.
+ */
+export function GuestEditor({
+  doc,
+  editable,
+  loadImage,
+  toast,
+}: {
+  doc: Y.Doc;
+  editable: boolean;
+  loadImage: (src: string) => Promise<string>;
+  toast: (message: string) => void;
+}) {
+  const [link, setLink] = useState<string | null>(null);
+  const [tick, setTick] = useState(0);
+  const fields = doc.getMap('collaboration');
+  const [title, setTitle] = useState(() => String(fields.get('title') ?? ''));
+  useEffect(() => {
+    const update = () => setTitle(String(fields.get('title') ?? ''));
+    fields.observe(update);
+    update();
+    return () => fields.unobserve(update);
+  }, [fields]);
+  const touch = () => fields.set('updatedAt', new Date().toISOString());
+  const editor = useEditor({
+    editable,
+    extensions: [
+      StarterKit.configure({
+        undoRedo: false,
+        heading: { levels: [2, 3] },
+        link: { openOnClick: false },
+      }),
+      Collaboration.configure({ document: doc, field: 'content' }),
+      Spoiler,
+      TaskList,
+      Tasks,
+      TaskIds,
+      LocalImage.configure({ load: loadImage }),
+    ],
+    editorProps: {
+      attributes: { 'aria-label': 'Текст заметки', class: 'note-body' },
+      // картинки гостям не загружаются: вставленный файл просто игнорируем
+      handlePaste: (_view, event) => {
+        if (!event.clipboardData?.files.length) return false;
+        event.preventDefault();
+        toast('Гости не могут добавлять картинки');
+        return true;
+      },
+      handleDrop: (_view, event) => {
+        if (!event.dataTransfer?.files.length) return false;
+        event.preventDefault();
+        toast('Гости не могут добавлять картинки');
+        return true;
+      },
+      handleClick: (_view, _pos, event) => {
+        const target = (event.target as HTMLElement).closest('[data-spoiler]');
+        if (target) {
+          target.classList.toggle('revealed');
+          return true;
+        }
+        return false;
+      },
+    },
+    onUpdate: ({ transaction }) => {
+      if (transaction.getMeta(ySyncPluginKey) || transaction.getMeta(NORMALIZE)) return;
+      queueMicrotask(touch);
+    },
+    onSelectionUpdate: () => setTick((t) => t + 1),
+    onTransaction: () => setTick((t) => t + 1),
+  });
+  useEffect(() => {
+    editor?.setEditable(editable, false);
+  }, [editor, editable]);
+  if (!editor) return null;
+  return (
+    <>
+      {editable && (
+        <FormatToolbar
+          editor={editor}
+          tick={tick}
+          onLink={() => setLink(editor.getAttributes('link').href || '')}
+        />
+      )}
+      <div className="document">
+        <input
+          className="note-title"
+          readOnly={!editable}
+          aria-label="Название заметки"
+          placeholder="Без названия"
+          value={title}
+          onChange={(e) =>
+            doc.transact(() => {
+              fields.set('title', e.target.value);
+              touch();
+            })
+          }
+        />
+        <EditorContent editor={editor} />
+      </div>
+      {link !== null && <LinkDialog editor={editor} link={link} setLink={setLink} toast={toast} />}
     </>
   );
 }

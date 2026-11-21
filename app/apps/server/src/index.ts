@@ -108,7 +108,10 @@ function database(): DB {
 }
 async function userId(request: import('fastify').FastifyRequest): Promise<string> {
   await request.jwtVerify();
-  const claims = request.user as { sub: string; sid: string };
+  const claims = request.user as { sub?: string; sid?: string };
+  // токен гостя (gsid) не даёт доступа к API пользователей
+  if (!claims.sub || !claims.sid)
+    throw Object.assign(new Error('Войдите в аккаунт'), { statusCode: 401 });
   const session = await database()
     .selectFrom('sessions')
     .select('id')
@@ -297,6 +300,11 @@ app.post(
       return reply.code(401).send({ message: 'Неверная почта или пароль' });
     }
     failedLogins.delete(input.email);
+    // о блокировке сообщаем только после верного пароля: так нельзя проверить чужой адрес
+    if (user.blocked_at)
+      return reply
+        .code(403)
+        .send({ message: 'Аккаунт заблокирован администратором сервиса', blocked: true });
     return issueSession(user, reply);
   },
 );
@@ -310,11 +318,17 @@ app.post('/api/auth/refresh', async (request, reply) => {
     .where('expires_at', '>', new Date().toISOString())
     .executeTakeFirst();
   if (!session) return reply.code(401).send({ message: 'Сессия завершена' });
-  const user = await database()
+  const row = await database()
     .selectFrom('users')
-    .select(['id', 'name', 'email', 'role'])
+    .select(['id', 'name', 'email', 'role', 'blocked_at'])
     .where('id', '=', session.user_id)
-    .executeTakeFirstOrThrow();
+    .executeTakeFirst();
+  if (!row || row.blocked_at) {
+    await database().deleteFrom('sessions').where('id', '=', session.id).execute();
+    reply.clearCookie('refresh', { path: '/api' });
+    return reply.code(401).send({ message: 'Аккаунт заблокирован администратором сервиса' });
+  }
+  const user = { id: row.id, name: row.name, email: row.email, role: row.role };
   return {
     accessToken: app.jwt.sign({ sub: user.id, sid: session.id }, { expiresIn: '15m' }),
     user,
@@ -408,7 +422,7 @@ app.get('/api/admin/users', async (request) => {
   await requireAdmin(request);
   const users = await database()
     .selectFrom('users')
-    .select(['id', 'name', 'email', 'role', 'created_at'])
+    .select(['id', 'name', 'email', 'role', 'created_at', 'blocked_at'])
     .orderBy('created_at')
     .execute();
   return { users, registration: await registrationMode() };
@@ -597,42 +611,219 @@ app.post('/api/admin/users', async (request, reply) => {
 app.patch('/api/admin/users/:id', async (request) => {
   const me = await requireAdmin(request);
   const target = (request.params as { id: string }).id;
-  const { role, password } = z
-    .object({ role: roleSchema.optional(), password: z.string().min(10).max(256).optional() })
+  const { role, password, blocked } = z
+    .object({
+      role: roleSchema.optional(),
+      password: z.string().min(10).max(256).optional(),
+      blocked: z.boolean().optional(),
+    })
     .parse(request.body);
   if (password && target === me)
     throw Object.assign(new Error('Свой пароль меняйте в разделе «Профиль»'), { statusCode: 400 });
+  if (blocked && target === me)
+    throw Object.assign(new Error('Нельзя заблокировать свой аккаунт'), { statusCode: 400 });
   const password_hash = password
     ? await argon2.hash(password, { type: argon2.argon2id })
     : undefined;
+  let blockedAt: string | null | undefined;
   await database()
     .transaction()
     .execute(async (trx) => {
       const user = await trx
         .selectFrom('users')
-        .select('role')
+        .select(['role', 'blocked_at'])
         .where('id', '=', target)
         .executeTakeFirst();
       if (!user) throw Object.assign(new Error('Пользователь не найден'), { statusCode: 404 });
-      if (role && user.role === 'admin' && role !== 'admin') {
-        const admins = await trx
-          .selectFrom('users')
-          .select(({ fn }) => fn.countAll<number>().as('n'))
-          .where('role', '=', 'admin')
-          .executeTakeFirstOrThrow();
-        if (Number(admins.n) <= 1)
-          throw Object.assign(new Error('Нельзя снять права с единственного администратора'), {
-            statusCode: 400,
-          });
-      }
+      const losesAdmin =
+        user.role === 'admin' &&
+        !user.blocked_at &&
+        ((role && role !== 'admin') || blocked === true);
+      if (losesAdmin && (await activeAdmins(trx)) <= 1)
+        throw Object.assign(
+          new Error(
+            blocked
+              ? 'Нельзя заблокировать единственного действующего администратора'
+              : 'Нельзя снять права с единственного администратора',
+          ),
+          { statusCode: 400 },
+        );
       if (role) await trx.updateTable('users').set({ role }).where('id', '=', target).execute();
       if (password_hash) {
         await trx.updateTable('users').set({ password_hash }).where('id', '=', target).execute();
         // новый пароль выдан администратором — старые входы этого пользователя завершаются
         await trx.deleteFrom('sessions').where('user_id', '=', target).execute();
       }
+      if (blocked !== undefined) {
+        blockedAt = blocked ? (user.blocked_at ?? new Date().toISOString()) : null;
+        await trx
+          .updateTable('users')
+          .set({ blocked_at: blockedAt })
+          .where('id', '=', target)
+          .execute();
+        if (blocked) await trx.deleteFrom('sessions').where('user_id', '=', target).execute();
+      }
     });
-  return { ok: true };
+  blockedOwners.clear();
+  if (blocked) closeUserConnections(target, 'Аккаунт заблокирован');
+  // Доступ участников и гостей к заметкам владельца изменился — пусть переподключатся.
+  if (blocked !== undefined) closeOwnerShares(target);
+  return { ok: true, ...(blockedAt !== undefined ? { blocked_at: blockedAt } : {}) };
+});
+/** Действующие (не заблокированные) администраторы. */
+async function activeAdmins(trx: Pick<DB, 'selectFrom'>) {
+  const admins = await trx
+    .selectFrom('users')
+    .select(({ fn }) => fn.countAll<number>().as('n'))
+    .where('role', '=', 'admin')
+    .where('blocked_at', 'is', null)
+    .executeTakeFirstOrThrow();
+  return Number(admins.n);
+}
+/**
+ * Владелец заблокирован: его заметки недоступны участникам, гостям и по публичным ссылкам
+ * (данные сохраняются и вернутся после разблокировки). Кэш на несколько секунд — проверка
+ * идёт при каждой авторизации документа.
+ */
+const blockedOwners = new Map<string, { blocked: boolean; at: number }>();
+async function ownerBlocked(owner: string) {
+  const cached = blockedOwners.get(owner);
+  if (cached && Date.now() - cached.at < 5000) return cached.blocked;
+  const row = await database()
+    .selectFrom('users')
+    .select('blocked_at')
+    .where('id', '=', owner)
+    .executeTakeFirst();
+  const blocked = !row || Boolean(row.blocked_at);
+  if (blockedOwners.size > 1000) blockedOwners.clear();
+  blockedOwners.set(owner, { blocked, at: Date.now() });
+  return blocked;
+}
+/** Закрыть все соединения, открытые этим пользователем (не гостями). */
+function closeUserConnections(user: string, reason: string) {
+  for (const document of collab.documents.values())
+    for (const { connection } of document.connections.values()) {
+      const context = connection.context as { owner?: string; guest?: unknown };
+      if (!context.guest && context.owner === user) connection.webSocket.close(4205, reason);
+    }
+}
+/** Закрыть соединения участников и гостей в заметках владельца. */
+function closeOwnerShares(owner: string) {
+  void (async () => {
+    for (const [name, document] of collab.documents) {
+      if (!name.startsWith('note:')) continue;
+      const row = await database()
+        .selectFrom('yjs_documents')
+        .select('owner_id')
+        .where('name', '=', name)
+        .executeTakeFirst();
+      if (row?.owner_id !== owner) continue;
+      for (const { connection } of document.connections.values()) {
+        const context = connection.context as { owner?: string };
+        if (context.owner !== owner) connection.webSocket.close(4205, 'Права доступа изменились');
+      }
+    }
+  })().catch((error) => app.log.error(error, 'Не удалось переподключить участников'));
+}
+/**
+ * Удалить пользователя вместе с его данными: заметки, история, картинки, ссылки, доступы.
+ * Правки, которые он делал в чужих заметках, остаются в их истории без имени автора.
+ */
+app.delete('/api/admin/users/:id', async (request, reply) => {
+  const me = await requireAdmin(request);
+  const target = z.uuid().parse((request.params as { id: string }).id);
+  const { confirm } = z.object({ confirm: z.string().max(254) }).parse(request.body ?? {});
+  if (target === me) return reply.code(400).send({ message: 'Нельзя удалить свой аккаунт' });
+  const user = await database()
+    .selectFrom('users')
+    .select(['email', 'role', 'blocked_at'])
+    .where('id', '=', target)
+    .executeTakeFirst();
+  if (!user) return reply.code(404).send({ message: 'Пользователь не найден' });
+  if (confirm.trim().toLowerCase() !== user.email)
+    return reply
+      .code(400)
+      .send({ message: 'Для подтверждения введите почту удаляемого пользователя' });
+  if (user.role === 'admin' && !user.blocked_at && (await activeAdmins(database())) <= 1)
+    return reply.code(400).send({ message: 'Нельзя удалить единственного администратора' });
+  // Сначала отключаем: новых входов и соединений больше не будет.
+  await database()
+    .updateTable('users')
+    .set({ blocked_at: user.blocked_at ?? new Date().toISOString() })
+    .where('id', '=', target)
+    .execute();
+  await database().deleteFrom('sessions').where('user_id', '=', target).execute();
+  blockedOwners.clear();
+  const noteIds = new Set<string>();
+  for (const row of await database()
+    .selectFrom('yjs_documents')
+    .select('name')
+    .where('owner_id', '=', target)
+    .where('name', 'like', 'note:%')
+    .execute())
+    noteIds.add(row.name.slice(5));
+  for (const table of ['encrypted_notes', 'notes_index'] as const)
+    for (const row of await database()
+      .selectFrom(table)
+      .select('note_id')
+      .where('owner_id', '=', target)
+      .execute())
+      noteIds.add(row.note_id);
+  const ids = [...noteIds];
+  // Выгружаем документы из памяти сервера, чтобы отложенное сохранение их не вернуло.
+  const names = [`space:${target}`, ...ids.map((id) => `note:${id}`)];
+  closeUserConnections(target, 'Аккаунт удалён');
+  for (const name of names) if (collab.documents.has(name)) collab.closeConnections(name);
+  const deadline = Date.now() + 15000;
+  while (names.some((name) => collab.documents.has(name)) && Date.now() < deadline)
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  await serializeDocuments(async () => {
+    await database()
+      .transaction()
+      .execute(async (trx) => {
+        for (let i = 0; i < ids.length; i += 500) {
+          const chunk = ids.slice(i, i + 500);
+          const known = new Set(
+            (
+              await trx
+                .selectFrom('purged_notes')
+                .select('note_id')
+                .where('note_id', 'in', chunk)
+                .execute()
+            ).map((row) => row.note_id),
+          );
+          const fresh = chunk.filter((id) => !known.has(id));
+          // надгробия: устройства участников и отложенные сохранения не воскресят заметки
+          if (fresh.length)
+            await trx
+              .insertInto('purged_notes')
+              .values(fresh.map((note_id) => ({ note_id, owner_id: target })))
+              .execute();
+          await trx.deleteFrom('note_versions').where('note_id', 'in', chunk).execute();
+          await trx.deleteFrom('note_members').where('note_id', 'in', chunk).execute();
+          await trx.deleteFrom('tasks').where('note_id', 'in', chunk).execute();
+        }
+        const links = trx.selectFrom('guest_links').select('id').where('owner_id', '=', target);
+        await trx.deleteFrom('guest_sessions').where('link_id', 'in', links).execute();
+        await trx.deleteFrom('guest_links').where('owner_id', '=', target).execute();
+        await trx.deleteFrom('note_members').where('user_id', '=', target).execute();
+        await trx.deleteFrom('yjs_documents').where('owner_id', '=', target).execute();
+        await trx.deleteFrom('notes_index').where('owner_id', '=', target).execute();
+        await trx.deleteFrom('tasks').where('owner_id', '=', target).execute();
+        await trx.deleteFrom('encrypted_notes').where('owner_id', '=', target).execute();
+        await trx.deleteFrom('shares').where('owner_id', '=', target).execute();
+        await trx.deleteFrom('note_attachments').where('owner_id', '=', target).execute();
+        await trx.deleteFrom('attachments').where('owner_id', '=', target).execute();
+        await trx.deleteFrom('invites').where('created_by', '=', target).execute();
+        await trx.deleteFrom('settings').where('key', '=', `vault:${target}`).execute();
+        await trx.deleteFrom('sessions').where('user_id', '=', target).execute();
+        await trx.deleteFrom('users').where('id', '=', target).execute();
+      });
+  });
+  await rm(path.join(dataDir, 'attachments', target), { recursive: true, force: true });
+  blockedOwners.clear();
+  app.log.warn({ user: target, notes: ids.length }, 'Пользователь удалён администратором');
+  return { ok: true, notes: ids.length };
 });
 async function authorizeDocument(name: string, owner: string, write = false): Promise<NoteRole> {
   if (name === `space:${owner}`) return 'owner';
@@ -652,6 +843,8 @@ async function authorizeDocument(name: string, owner: string, write = false): Pr
     .where('name', '=', name)
     .executeTakeFirst();
   if (!row || row.owner_id === owner) return 'owner';
+  if (await ownerBlocked(row.owner_id))
+    throw Object.assign(new Error('Нет доступа'), { statusCode: 403 });
   const member = await database()
     .selectFrom('note_members')
     .selectAll()
@@ -697,6 +890,12 @@ async function storeDocument(name: string, document: Y.Doc, owner: string, autho
       .executeTakeFirst()) ||
       // заметку только что закрыли паролем — открытый текст больше не сохраняем
       (await encryptedRow(name.slice(5))))
+  )
+    return;
+  // пользователя удалили, пока его пространство было открыто — не восстанавливаем
+  if (
+    name.startsWith('space:') &&
+    !(await database().selectFrom('users').select('id').where('id', '=', owner).executeTakeFirst())
   )
     return;
   await authorizeDocument(name, owner);
@@ -763,6 +962,15 @@ async function storeDocument(name: string, document: Y.Doc, owner: string, autho
           await trx.deleteFrom('shares').where('note_id', '=', id).execute();
           await trx.deleteFrom('note_members').where('note_id', '=', id).execute();
           await trx.deleteFrom('note_attachments').where('note_id', '=', id).execute();
+          await trx
+            .deleteFrom('guest_sessions')
+            .where(
+              'link_id',
+              'in',
+              trx.selectFrom('guest_links').select('id').where('note_id', '=', id),
+            )
+            .execute();
+          await trx.deleteFrom('guest_links').where('note_id', '=', id).execute();
         }
         const deleted = [...deletedNoteIds(document)];
         let restore = trx
@@ -907,7 +1115,16 @@ const collab = new Hocuspocus({
   maxDebounce: 2000,
   async onAuthenticate({ token, documentName, connectionConfig }) {
     if (maintenance) throw new Error('Идёт восстановление из резервной копии');
-    const claims = app.jwt.verify<{ sub: string; sid: string }>(token);
+    const claims = app.jwt.verify<{ sub?: string; sid?: string; gsid?: string }>(token);
+    if (claims.gsid) {
+      const guest = await guestAccess(claims.gsid, documentName);
+      connectionConfig.readOnly = guest.role === 'reader';
+      return {
+        owner: guest.session_id,
+        guest: { linkId: guest.link_id, noteId: guest.note_id, name: guest.name },
+      };
+    }
+    if (!claims.sub || !claims.sid) throw new Error('Войдите в аккаунт');
     const session = await database()
       .selectFrom('sessions')
       .select('id')
@@ -923,10 +1140,23 @@ const collab = new Hocuspocus({
   async beforeHandleMessage({ context, documentName, connection }) {
     if (maintenance) throw new Error('Идёт восстановление из резервной копии');
     await restoring;
-    const { owner, sid } = context as { owner: string; sid: string };
+    const { owner, sid, guest } = context as { owner: string; sid: string; guest?: unknown };
     // Права перепроверяем не чаще раза в 5 секунд: смена роли, отзыв, корзина, пароль
     // и удаление и так закрывают соединение (resetNoteConnections / closeConnections).
     const checked = ((context as { checked?: Record<string, number> }).checked ??= {});
+    if (guest) {
+      if (!checked[documentName] || Date.now() - checked[documentName] > 5000) {
+        const access = await guestAccess(owner, documentName);
+        connection.readOnly = access.role === 'reader';
+        checked[documentName] = Date.now();
+        await database()
+          .updateTable('guest_sessions')
+          .set({ last_seen_at: new Date().toISOString() })
+          .where('id', '=', owner)
+          .execute();
+      }
+      return;
+    }
     if (!checked[documentName] || Date.now() - checked[documentName] > 5000) {
       const role = await authorizeDocument(documentName, owner);
       connection.readOnly = role === 'reader';
@@ -942,7 +1172,19 @@ const collab = new Hocuspocus({
     if (!session) throw new Error('Сессия завершена');
   },
   async onLoadDocument({ documentName, document, context }) {
-    const owner = (context as { owner: string }).owner;
+    const { owner, guest } = context as { owner: string; guest?: unknown };
+    if (guest) {
+      // гость открывает только существующую заметку владельца
+      await guestAccess(owner, documentName);
+      const stored = await database()
+        .selectFrom('yjs_documents')
+        .select('state')
+        .where('name', '=', documentName)
+        .executeTakeFirst();
+      if (!stored) throw new Error('Заметка недоступна');
+      Y.applyUpdate(document, stored.state);
+      return document;
+    }
     await authorizeDocument(documentName, owner);
     let row = await database()
       .selectFrom('yjs_documents')
@@ -1055,19 +1297,25 @@ app.get('/api/notes/:id/versions', async (request) => {
   const owner = await userId(request);
   const id = z.uuid().parse((request.params as { id: string }).id);
   await ownedNote(id, owner);
-  return database()
+  const rows = await database()
     .selectFrom('note_versions')
     .leftJoin('users', 'users.id', 'note_versions.author')
+    .leftJoin('guest_sessions', 'guest_sessions.id', 'note_versions.author')
     .select([
       'note_versions.id',
       'note_versions.created_at',
       'note_versions.label',
       'note_versions.author',
-      'users.name as author_name',
+      'users.name as user_name',
+      'guest_sessions.name as guest_name',
     ])
     .where('note_id', '=', id)
     .orderBy('note_versions.created_at', 'desc')
     .execute();
+  return rows.map(({ user_name, guest_name, ...row }) => ({
+    ...row,
+    author_name: user_name ?? (guest_name ? `${guest_name} (гость)` : null),
+  }));
 });
 app.get('/api/notes/:id/versions/:vid', async (request) => {
   const owner = await userId(request);
@@ -1562,8 +1810,16 @@ app.put('/api/encrypted/:id', { bodyLimit: 32 * 1024 * 1024 }, async (request, r
       .select('user_id')
       .where('note_id', '=', id)
       .executeTakeFirst();
-    if (members)
-      return reply.code(409).send({ message: 'Сначала отзовите совместный доступ и приглашения' });
+    const guests = await database()
+      .selectFrom('guest_links')
+      .select('id')
+      .where('note_id', '=', id)
+      .where('revoked_at', 'is', null)
+      .executeTakeFirst();
+    if (members || guests)
+      return reply
+        .code(409)
+        .send({ message: 'Сначала отзовите совместный доступ, приглашения и гостевые ссылки' });
     const attachments = JSON.stringify(input.attachments);
     const row = await encryptedRow(id);
     if (row && row.owner_id !== owner) return reply.code(403).send({ message: 'Нет доступа' });
@@ -1599,6 +1855,15 @@ app.put('/api/encrypted/:id', { bodyLimit: 32 * 1024 * 1024 }, async (request, r
           await trx.deleteFrom('shares').where('note_id', '=', id).execute();
           await trx.deleteFrom('note_members').where('note_id', '=', id).execute();
           await trx.deleteFrom('note_attachments').where('note_id', '=', id).execute();
+          await trx
+            .deleteFrom('guest_sessions')
+            .where(
+              'link_id',
+              'in',
+              trx.selectFrom('guest_links').select('id').where('note_id', '=', id),
+            )
+            .execute();
+          await trx.deleteFrom('guest_links').where('note_id', '=', id).execute();
         });
       collab.closeConnections(`note:${id}`);
       return { version: 1, updated_at: now };
@@ -1684,6 +1949,7 @@ app.get('/api/collaboration', async (request): Promise<CollaborationList> => {
     .execute();
   const notes: CollaborationList['notes'] = [];
   for (const row of rows) {
+    if (await ownerBlocked(row.owner_id)) continue;
     const meta = await spaceNote(row.owner_id, row.note_id);
     if (!meta || meta.deletedAt || meta.encrypted || (await encryptedRow(row.note_id))) continue;
     notes.push({
@@ -1707,7 +1973,17 @@ app.get('/api/collaboration', async (request): Promise<CollaborationList> => {
     .where('notes_index.owner_id', '=', user)
     .distinct()
     .execute();
-  return { notes, owned: ownedRows.map((row) => row.note_id) };
+  const guestRows = await database()
+    .selectFrom('guest_links')
+    .select('note_id')
+    .where('owner_id', '=', user)
+    .where('revoked_at', 'is', null)
+    .distinct()
+    .execute();
+  return {
+    notes,
+    owned: [...new Set([...ownedRows, ...guestRows].map((row) => row.note_id))],
+  };
 });
 app.get('/api/notes/:id/members', async (request) => {
   const user = await userId(request);
@@ -1804,7 +2080,20 @@ async function addMember(
   role: 'editor' | 'reader',
   acceptedAt: string | null,
 ) {
-  // Общий заголовок хранится в документе заметки, чужое пространство не раскрывается.
+  await shareTitle(id, owner, meta);
+  await database()
+    .insertInto('note_members')
+    .values({
+      note_id: id,
+      user_id: target,
+      role,
+      accepted_at: acceptedAt,
+      created_at: new Date().toISOString(),
+    })
+    .execute();
+}
+/** Общий заголовок хранится в документе заметки, чужое пространство не раскрывается. */
+async function shareTitle(id: string, owner: string, meta: Note) {
   const connection = await collab.openDirectConnection(`note:${id}`, {
     owner,
     historyOperation: true,
@@ -1818,16 +2107,6 @@ async function addMember(
   } finally {
     await connection.disconnect();
   }
-  await database()
-    .insertInto('note_members')
-    .values({
-      note_id: id,
-      user_id: target,
-      role,
-      accepted_at: acceptedAt,
-      created_at: new Date().toISOString(),
-    })
-    .execute();
 }
 app.get('/api/notes/:id/invites', async (request) => {
   const user = await userId(request);
@@ -1893,6 +2172,464 @@ app.delete('/api/notes/:id/members/:uid', async (request) => {
     resetNoteConnections(id, uid);
     return { ok: true };
   });
+});
+
+// ===== Гости: персональная ссылка + PIN =====
+// Гость не регистрируется: открывает /g/<токен>, вводит имя и PIN. Сервер выдаёт cookie
+// устройства (путь — только эта ссылка) и короткий JWT с gsid для WebSocket и картинок.
+const GUEST_FAILS = 5;
+const GUEST_LOCK_MS = 3600000;
+const GUEST_SESSION_MS = 30 * 86400000;
+const guestUnavailable = () =>
+  Object.assign(new Error('Ссылка недоступна: её отозвали, срок истёк или заметку удалили'), {
+    statusCode: 410,
+  });
+function guestLinkActive(link: { revoked_at: string | null; expires_at: string | null }) {
+  return !link.revoked_at && (!link.expires_at || Date.parse(link.expires_at) > Date.now());
+}
+/** Заметка открыта для гостей: обычная, не в корзине, владелец не заблокирован. */
+async function guestNote(noteId: string, owner: string) {
+  if (await ownerBlocked(owner)) throw guestUnavailable();
+  if ((await ownedNoteKind(noteId, owner)) !== 'plain') throw guestUnavailable();
+  const meta = await spaceNote(owner, noteId);
+  if (!meta || meta.deletedAt || meta.encrypted || meta.kind === 'passwords')
+    throw guestUnavailable();
+  return meta;
+}
+/** Права устройства гостя; documentName — проверить, что это именно его заметка. */
+async function guestAccess(sessionId: string, documentName?: string) {
+  const row = await database()
+    .selectFrom('guest_sessions')
+    .innerJoin('guest_links', 'guest_links.id', 'guest_sessions.link_id')
+    .select([
+      'guest_sessions.id as session_id',
+      'guest_sessions.name',
+      'guest_sessions.ended_at',
+      'guest_links.id as link_id',
+      'guest_links.token',
+      'guest_links.note_id',
+      'guest_links.owner_id',
+      'guest_links.role',
+      'guest_links.expires_at',
+      'guest_links.revoked_at',
+    ])
+    .where('guest_sessions.id', '=', sessionId)
+    .executeTakeFirst();
+  if (!row || row.ended_at || !guestLinkActive(row)) throw guestUnavailable();
+  if (documentName && documentName !== `note:${row.note_id}`)
+    throw Object.assign(new Error('Нет доступа'), { statusCode: 403 });
+  const meta = await guestNote(row.note_id, row.owner_id);
+  return { ...row, meta };
+}
+async function findGuestLink(token: string) {
+  if (!db || !/^[A-Za-z0-9_-]{32}$/.test(token)) return null;
+  const link = await database()
+    .selectFrom('guest_links')
+    .selectAll()
+    .where('token', '=', token)
+    .executeTakeFirst();
+  if (!link || !guestLinkActive(link)) return null;
+  try {
+    return { link, meta: await guestNote(link.note_id, link.owner_id) };
+  } catch {
+    return null;
+  }
+}
+/** Закрыть соединения гостей этой ссылки: провайдер переподключится с новыми правами или получит отказ. */
+function closeGuestConnections(linkId: string, reason = 'Доступ по ссылке изменился') {
+  for (const document of collab.documents.values())
+    for (const { connection } of document.connections.values()) {
+      const guest = (connection.context as { guest?: { linkId: string } }).guest;
+      if (guest?.linkId === linkId) connection.webSocket.close(4205, reason);
+    }
+}
+const guestCookie = (token: string) => ({
+  httpOnly: true,
+  secure,
+  sameSite: 'strict' as const,
+  path: `/api/guest/${token}`,
+  maxAge: GUEST_SESSION_MS / 1000,
+});
+function guestAuth(
+  session: { id: string; name: string },
+  link: { note_id: string; role: string },
+  meta: Note,
+) {
+  return {
+    accessToken: app.jwt.sign({ gsid: session.id }, { expiresIn: '15m' }),
+    guest: { id: session.id, name: session.name },
+    note: { id: link.note_id, title: meta.title || '', role: link.role as 'editor' | 'reader' },
+  };
+}
+/** Устройство гостя по cookie (только для этой ссылки). */
+async function guestDevice(request: import('fastify').FastifyRequest, linkId: string) {
+  const secretValue = request.cookies.guest;
+  if (!secretValue) return undefined;
+  const session = await database()
+    .selectFrom('guest_sessions')
+    .select(['id', 'name', 'created_at'])
+    .where('token_hash', '=', hash(secretValue))
+    .where('link_id', '=', linkId)
+    .where('ended_at', 'is', null)
+    .executeTakeFirst();
+  if (!session || Date.parse(session.created_at) + GUEST_SESSION_MS < Date.now()) return undefined;
+  return session;
+}
+const guestToken = z.object({ token: z.string().max(64) });
+/** Что видно до ввода PIN: кто пригласил и с какими правами. Название заметки — только после входа. */
+app.get(
+  '/api/guest/:token',
+  { config: { rateLimit: { max: 60, timeWindow: '1 minute' } } },
+  async (request, reply) => {
+    const { token } = guestToken.parse(request.params);
+    const found = await findGuestLink(token);
+    if (!found) return reply.code(410).send({ message: guestUnavailable().message });
+    const owner = await database()
+      .selectFrom('users')
+      .select('name')
+      .where('id', '=', found.link.owner_id)
+      .executeTakeFirst();
+    const locked =
+      found.link.locked_until && Date.parse(found.link.locked_until) > Date.now()
+        ? found.link.locked_until
+        : null;
+    return { ownerName: owner?.name ?? '', role: found.link.role, lockedUntil: locked };
+  },
+);
+app.post(
+  '/api/guest/:token/login',
+  { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } },
+  async (request, reply) => {
+    const { token } = guestToken.parse(request.params);
+    const input = z
+      .object({ name: z.string().trim().min(1).max(60), pin: z.string().min(1).max(64) })
+      .parse(request.body);
+    const found = await findGuestLink(token);
+    if (!found) return reply.code(410).send({ message: guestUnavailable().message });
+    const { link, meta } = found;
+    const lockedMessage = (until: string) => ({
+      message: 'Слишком много неверных PIN. Ссылка заблокирована на час',
+      lockedUntil: until,
+    });
+    if (link.locked_until && Date.parse(link.locked_until) > Date.now())
+      return reply.code(423).send(lockedMessage(link.locked_until));
+    if (!(await argon2.verify(link.pin_hash, input.pin.trim()))) {
+      await database()
+        .updateTable('guest_links')
+        .set({ failed_attempts: sql`failed_attempts + 1` })
+        .where('id', '=', link.id)
+        .execute();
+      const { failed_attempts } = await database()
+        .selectFrom('guest_links')
+        .select('failed_attempts')
+        .where('id', '=', link.id)
+        .executeTakeFirstOrThrow();
+      if (failed_attempts >= GUEST_FAILS) {
+        const until = new Date(Date.now() + GUEST_LOCK_MS).toISOString();
+        await database()
+          .updateTable('guest_links')
+          .set({ failed_attempts: 0, locked_until: until })
+          .where('id', '=', link.id)
+          .execute();
+        return reply.code(423).send(lockedMessage(until));
+      }
+      return reply
+        .code(401)
+        .send({ message: `Неверный PIN. Осталось попыток: ${GUEST_FAILS - failed_attempts}` });
+    }
+    const now = new Date().toISOString();
+    await database()
+      .updateTable('guest_links')
+      .set({ failed_attempts: 0, locked_until: null, last_used_at: now })
+      .where('id', '=', link.id)
+      .execute();
+    // повторный вход с того же устройства не занимает новое место
+    const previous = await guestDevice(request, link.id);
+    if (previous)
+      await database()
+        .updateTable('guest_sessions')
+        .set({ ended_at: now })
+        .where('id', '=', previous.id)
+        .execute();
+    if (link.max_devices) {
+      const used = await database()
+        .selectFrom('guest_sessions')
+        .select(({ fn }) => fn.countAll<number>().as('n'))
+        .where('link_id', '=', link.id)
+        .where('ended_at', 'is', null)
+        .executeTakeFirstOrThrow();
+      if (Number(used.n) >= link.max_devices)
+        return reply.code(403).send({
+          message:
+            'По этой ссылке уже вошли с максимального числа устройств. Попросите владельца заметки сбросить устройства',
+        });
+    }
+    const secretValue = randomBytes(32).toString('base64url');
+    const session = { id: randomUUID(), name: input.name };
+    await database()
+      .insertInto('guest_sessions')
+      .values({
+        ...session,
+        link_id: link.id,
+        token_hash: hash(secretValue),
+        created_at: now,
+        last_seen_at: now,
+        ended_at: null,
+      })
+      .execute();
+    reply.setCookie('guest', secretValue, guestCookie(token));
+    return guestAuth(session, link, meta);
+  },
+);
+app.post(
+  '/api/guest/:token/refresh',
+  { config: { rateLimit: { max: 60, timeWindow: '1 minute' } } },
+  async (request, reply) => {
+    const { token } = guestToken.parse(request.params);
+    const found = await findGuestLink(token);
+    if (!found) return reply.code(410).send({ message: guestUnavailable().message });
+    const session = await guestDevice(request, found.link.id);
+    if (!session) return reply.code(401).send({ message: 'Введите имя и PIN' });
+    await database()
+      .updateTable('guest_sessions')
+      .set({ last_seen_at: new Date().toISOString() })
+      .where('id', '=', session.id)
+      .execute();
+    return guestAuth(session, found.link, found.meta);
+  },
+);
+app.post('/api/guest/:token/logout', async (request, reply) => {
+  const { token } = guestToken.parse(request.params);
+  const link = await database()
+    .selectFrom('guest_links')
+    .select('id')
+    .where('token', '=', token)
+    .executeTakeFirst();
+  const session = link ? await guestDevice(request, link.id) : undefined;
+  if (session) {
+    await database()
+      .updateTable('guest_sessions')
+      .set({ ended_at: new Date().toISOString() })
+      .where('id', '=', session.id)
+      .execute();
+    for (const document of collab.documents.values())
+      for (const { connection } of document.connections.values())
+        if ((connection.context as { owner?: string }).owner === session.id)
+          connection.webSocket.close(4205, 'Выход');
+  }
+  reply.clearCookie('guest', { path: `/api/guest/${token}` });
+  return { ok: true };
+});
+/** Картинки заметки для гостя (по JWT устройства); загружать картинки гостям нельзя. */
+app.get('/api/guest/:token/img/:id', async (request, reply) => {
+  const { token, id } = z
+    .object({ token: z.string().max(64), id: z.string().regex(/^[a-f0-9]{64}$/) })
+    .parse(request.params);
+  await request.jwtVerify();
+  const { gsid } = request.user as { gsid?: string };
+  if (!gsid) return reply.code(401).send();
+  const access = await guestAccess(gsid);
+  if (access.token !== token) return reply.code(403).send();
+  let referenced = Boolean(
+    await database()
+      .selectFrom('note_attachments')
+      .select('attachment_id')
+      .where('note_id', '=', access.note_id)
+      .where('attachment_id', '=', id)
+      .executeTakeFirst(),
+  );
+  if (!referenced) {
+    const live = collab.documents.get(`note:${access.note_id}`) as Y.Doc | undefined;
+    referenced = Boolean(live && attachmentIds(live).includes(id));
+  }
+  if (!referenced) return reply.code(404).send();
+  const row = await database()
+    .selectFrom('attachments')
+    .select('id')
+    .where('id', '=', id)
+    .where('owner_id', '=', access.owner_id)
+    .executeTakeFirst();
+  if (!row) return reply.code(404).send();
+  const preview = (request.query as { preview?: string }).preview === '1';
+  reply.header('Cache-Control', 'private, no-store');
+  return reply
+    .type('image/webp')
+    .send(
+      await readFile(
+        path.join(
+          dataDir,
+          'attachments',
+          access.owner_id,
+          `${id}${preview ? '.preview' : ''}.webp`,
+        ),
+      ),
+    );
+});
+// Управление гостевыми ссылками — только владелец заметки.
+app.get('/api/notes/:id/guests', async (request) => {
+  const user = await userId(request);
+  const id = z.uuid().parse((request.params as { id: string }).id);
+  await manageNote(id, user);
+  const links = await database()
+    .selectFrom('guest_links')
+    .select([
+      'id',
+      'token',
+      'role',
+      'label',
+      'expires_at',
+      'max_devices',
+      'locked_until',
+      'created_at',
+      'last_used_at',
+    ])
+    .where('note_id', '=', id)
+    .where('owner_id', '=', user)
+    .where('revoked_at', 'is', null)
+    .orderBy('created_at')
+    .execute();
+  const devices = links.length
+    ? await database()
+        .selectFrom('guest_sessions')
+        .select(['id', 'link_id', 'name', 'last_seen_at'])
+        .where(
+          'link_id',
+          'in',
+          links.map((link) => link.id),
+        )
+        .where('ended_at', 'is', null)
+        .orderBy('last_seen_at', 'desc')
+        .execute()
+    : [];
+  const now = Date.now();
+  return links.map((link) => ({
+    ...link,
+    locked_until:
+      link.locked_until && Date.parse(link.locked_until) > now ? link.locked_until : null,
+    expired: Boolean(link.expires_at && Date.parse(link.expires_at) <= now),
+    devices: devices
+      .filter((device) => device.link_id === link.id)
+      .map((device) => ({ id: device.id, name: device.name, last_seen_at: device.last_seen_at })),
+  }));
+});
+app.post(
+  '/api/notes/:id/guests',
+  { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } },
+  async (request) => {
+    const user = await userId(request);
+    const id = z.uuid().parse((request.params as { id: string }).id);
+    const input = z
+      .object({
+        role: z.enum(['editor', 'reader']),
+        pin: z
+          .string()
+          .trim()
+          .regex(/^\S{6,32}$/, 'PIN — от 6 до 32 символов без пробелов'),
+        label: z.string().trim().max(120).optional(),
+        expiresInDays: z.union([z.literal(1), z.literal(7), z.literal(30)]).nullable(),
+        maxDevices: z.number().int().min(1).max(20).nullable(),
+      })
+      .parse(request.body);
+    return serializeDocuments(async () => {
+      const meta = await manageNote(id, user);
+      await shareTitle(id, user, meta);
+      const now = new Date();
+      const row = {
+        id: randomUUID(),
+        token: randomBytes(24).toString('base64url'),
+        note_id: id,
+        owner_id: user,
+        role: input.role,
+        label: input.label || null,
+        pin_hash: await argon2.hash(input.pin, { type: argon2.argon2id }),
+        expires_at: input.expiresInDays
+          ? new Date(now.getTime() + input.expiresInDays * 86400000).toISOString()
+          : null,
+        max_devices: input.maxDevices,
+        locked_until: null,
+        created_at: now.toISOString(),
+        last_used_at: null,
+        revoked_at: null,
+      };
+      await database().insertInto('guest_links').values(row).execute();
+      return {
+        id: row.id,
+        token: row.token,
+        role: row.role,
+        label: row.label,
+        expires_at: row.expires_at,
+        max_devices: row.max_devices,
+        locked_until: null,
+        created_at: row.created_at,
+        last_used_at: null,
+        expired: false,
+        devices: [],
+      };
+    });
+  },
+);
+async function ownGuestLink(request: import('fastify').FastifyRequest) {
+  const user = await userId(request);
+  const id = z.uuid().parse((request.params as { id: string }).id);
+  const link = await database()
+    .selectFrom('guest_links')
+    .select(['id', 'note_id'])
+    .where('id', '=', id)
+    .where('owner_id', '=', user)
+    .where('revoked_at', 'is', null)
+    .executeTakeFirst();
+  if (!link) throw Object.assign(new Error('Ссылка не найдена'), { statusCode: 404 });
+  return link;
+}
+app.patch('/api/guests/:id', async (request) => {
+  const link = await ownGuestLink(request);
+  const input = z
+    .object({
+      role: z.enum(['editor', 'reader']).optional(),
+      unlock: z.literal(true).optional(),
+      resetDevices: z.literal(true).optional(),
+    })
+    .parse(request.body);
+  const now = new Date().toISOString();
+  if (input.role)
+    await database()
+      .updateTable('guest_links')
+      .set({ role: input.role })
+      .where('id', '=', link.id)
+      .execute();
+  if (input.unlock)
+    await database()
+      .updateTable('guest_links')
+      .set({ failed_attempts: 0, locked_until: null })
+      .where('id', '=', link.id)
+      .execute();
+  if (input.resetDevices)
+    await database()
+      .updateTable('guest_sessions')
+      .set({ ended_at: now })
+      .where('link_id', '=', link.id)
+      .where('ended_at', 'is', null)
+      .execute();
+  if (input.role || input.resetDevices) closeGuestConnections(link.id);
+  return { ok: true };
+});
+/** Отзыв ссылки. Запись остаётся (revoked_at), чтобы имя гостя сохранилось в истории версий. */
+app.delete('/api/guests/:id', async (request) => {
+  const link = await ownGuestLink(request);
+  const now = new Date().toISOString();
+  await database()
+    .updateTable('guest_links')
+    .set({ revoked_at: now })
+    .where('id', '=', link.id)
+    .execute();
+  await database()
+    .updateTable('guest_sessions')
+    .set({ ended_at: now })
+    .where('link_id', '=', link.id)
+    .where('ended_at', 'is', null)
+    .execute();
+  closeGuestConnections(link.id, 'Ссылку отозвали');
+  return { ok: true };
 });
 
 // ===== Публичные ссылки =====
@@ -2045,6 +2782,7 @@ async function findShare(token: string) {
     .where('token', '=', token)
     .executeTakeFirst();
   if (!share || (share.expires_at && Date.parse(share.expires_at) <= Date.now())) return null;
+  if (await ownerBlocked(share.owner_id)) return null;
   const meta = await spaceNote(share.owner_id, share.note_id);
   if (!meta || meta.deletedAt || meta.kind === 'passwords') return null;
   const encrypted = await encryptedRow(share.note_id);
