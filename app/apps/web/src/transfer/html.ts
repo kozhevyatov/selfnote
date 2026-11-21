@@ -204,7 +204,11 @@ export function normalizeHtml(html: string, stats: NormalizeStats = { tables: 0,
   }
   for (const el of [...body.querySelectorAll('*')])
     for (const attr of [...el.attributes])
-      if (!/^(href|src|alt|data-type|data-checked|data-spoiler|due|start)$/.test(attr.name))
+      if (
+        !/^(href|src|alt|data-type|data-checked|data-spoiler|data-highlight|data-text-color|due|start)$/.test(
+          attr.name,
+        )
+      )
         el.removeAttribute(attr.name);
   return body.innerHTML;
 }

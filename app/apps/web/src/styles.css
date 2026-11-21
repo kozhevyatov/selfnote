@@ -2993,3 +2993,173 @@ small,
     margin-left: 0;
   }
 }
+
+/* Действия с пользователем — иконки, чтобы не отнимать место у имени. */
+.user-actions {
+  display: inline-flex;
+  flex: none;
+  gap: 2px;
+}
+.user-actions .icon-button {
+  width: 36px;
+  height: 36px;
+  min-height: 36px;
+}
+@media (max-width: 760px) {
+  .user-actions {
+    margin-left: auto;
+  }
+}
+
+/* Цвет текста и выделение: в заметке хранится имя цвета, оттенок — от темы. */
+:root {
+  --tc-red: #c62828;
+  --hl-red: #fde2e1;
+  --tc-orange: #c2570c;
+  --hl-orange: #fde8d3;
+  --tc-yellow: #a16207;
+  --hl-yellow: #fdf3b0;
+  --tc-green: #2e7d32;
+  --hl-green: #dcf2dc;
+  --tc-blue: #1d4ed8;
+  --hl-blue: #dce8fd;
+  --tc-purple: #7e22ce;
+  --hl-purple: #eee0fb;
+  --tc-gray: #6b6b72;
+  --hl-gray: #ebebe8;
+}
+:root[data-theme='dark'] {
+  --tc-red: #ff8a80;
+  --hl-red: #5a2626;
+  --tc-orange: #ffb070;
+  --hl-orange: #5a3a1c;
+  --tc-yellow: #f2cc5c;
+  --hl-yellow: #574a12;
+  --tc-green: #7ad48a;
+  --hl-green: #1f4428;
+  --tc-blue: #8ab4ff;
+  --hl-blue: #1d3358;
+  --tc-purple: #d0a2ff;
+  --hl-purple: #3f2a58;
+  --tc-gray: #a6a6ae;
+  --hl-gray: #3a3a40;
+}
+.text-color-red {
+  color: var(--tc-red);
+}
+.highlight-red {
+  background: var(--hl-red);
+}
+.text-color-orange {
+  color: var(--tc-orange);
+}
+.highlight-orange {
+  background: var(--hl-orange);
+}
+.text-color-yellow {
+  color: var(--tc-yellow);
+}
+.highlight-yellow {
+  background: var(--hl-yellow);
+}
+.text-color-green {
+  color: var(--tc-green);
+}
+.highlight-green {
+  background: var(--hl-green);
+}
+.text-color-blue {
+  color: var(--tc-blue);
+}
+.highlight-blue {
+  background: var(--hl-blue);
+}
+.text-color-purple {
+  color: var(--tc-purple);
+}
+.highlight-purple {
+  background: var(--hl-purple);
+}
+.text-color-gray {
+  color: var(--tc-gray);
+}
+.highlight-gray {
+  background: var(--hl-gray);
+}
+mark[class^='highlight-'] {
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.note-body hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 1.4em 0;
+}
+.note-body hr.ProseMirror-selectednode {
+  border-top-color: var(--accent);
+}
+/* Палитра на панели форматирования (position: fixed — панель прокручивается). */
+.color-popover {
+  position: fixed;
+  right: auto;
+  width: 220px;
+  min-width: 0;
+}
+.color-swatches {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+  padding: 2px 2px 6px;
+}
+.popover .color-swatch {
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  min-height: 26px;
+  padding: 0;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 14px;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.popover .color-swatch[class*='text-color-'] {
+  background: var(--soft);
+}
+.popover .color-swatch.selected {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+.popover .color-clear {
+  gap: 8px;
+  align-items: center;
+  border-top: 1px solid var(--border-soft);
+  border-radius: 0 0 8px 8px;
+  padding-top: 8px;
+}
+/* Кнопка на панели показывает текущий цвет выделенного текста. */
+.toolbar .icon-button.swatch-highlight:not(.active) {
+  background: var(--hl-yellow);
+}
+.toolbar .icon-button.swatch-highlight.highlight-red:not(.active) {
+  background: var(--hl-red);
+}
+.toolbar .icon-button.swatch-highlight.highlight-orange:not(.active) {
+  background: var(--hl-orange);
+}
+.toolbar .icon-button.swatch-highlight.highlight-yellow:not(.active) {
+  background: var(--hl-yellow);
+}
+.toolbar .icon-button.swatch-highlight.highlight-green:not(.active) {
+  background: var(--hl-green);
+}
+.toolbar .icon-button.swatch-highlight.highlight-blue:not(.active) {
+  background: var(--hl-blue);
+}
+.toolbar .icon-button.swatch-highlight.highlight-purple:not(.active) {
+  background: var(--hl-purple);
+}
+.toolbar .icon-button.swatch-highlight.highlight-gray:not(.active) {
+  background: var(--hl-gray);
+}

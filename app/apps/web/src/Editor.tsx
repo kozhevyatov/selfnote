@@ -34,6 +34,10 @@ import {
   CalendarDays,
   Repeat,
   Lock,
+  Baseline,
+  Highlighter,
+  SeparatorHorizontal,
+  Ban,
 } from 'lucide-react';
 import {
   checkTaskAttributes,
@@ -47,6 +51,7 @@ import {
   WrongPasswordError,
 } from '@selfnote/shared';
 import { secureTitle } from './secure';
+import { NOTE_COLORS, type NoteColor } from '@selfnote/shared';
 import { storeImage, imageUrl, flushImages } from './attachments';
 import { Workspace, useUI } from './store';
 export function dueLabel(due: string) {
@@ -195,6 +200,58 @@ const Spoiler = Mark.create({
     0,
   ],
 });
+const isNoteColor = (value: unknown): value is NoteColor =>
+  typeof value === 'string' && (NOTE_COLORS as readonly string[]).includes(value);
+/**
+ * Цвет текста и подложка. Храним не hex, а имя цвета из палитры: так цвет
+ * подстраивается под тёмную тему и одинаково выглядит на публичной странице.
+ */
+const TextColor = Mark.create({
+  name: 'textColor',
+  addAttributes: () => ({
+    color: {
+      default: null,
+      parseHTML: (el) => el.getAttribute('data-text-color'),
+      renderHTML: () => ({}),
+    },
+  }),
+  parseHTML: () => [
+    {
+      tag: 'span[data-text-color]',
+      getAttrs: (el) => (isNoteColor(el.getAttribute('data-text-color')) ? null : false),
+    },
+  ],
+  renderHTML: ({ mark }) => [
+    'span',
+    { 'data-text-color': mark.attrs.color, class: `text-color-${mark.attrs.color}` },
+    0,
+  ],
+});
+const Highlight = Mark.create({
+  name: 'highlight',
+  addAttributes: () => ({
+    color: {
+      default: 'yellow',
+      parseHTML: (el) => el.getAttribute('data-highlight') || 'yellow',
+      renderHTML: () => ({}),
+    },
+  }),
+  parseHTML: () => [{ tag: 'mark' }],
+  renderHTML: ({ mark }) => [
+    'mark',
+    { 'data-highlight': mark.attrs.color, class: `highlight-${mark.attrs.color}` },
+    0,
+  ],
+});
+const COLOR_LABELS: Record<NoteColor, string> = {
+  red: 'Красный',
+  orange: 'Оранжевый',
+  yellow: 'Жёлтый',
+  green: 'Зелёный',
+  blue: 'Синий',
+  purple: 'Фиолетовый',
+  gray: 'Серый',
+};
 function TaskView({ node, updateAttributes, editor }: NodeViewProps) {
   return (
     <NodeViewWrapper
@@ -427,6 +484,8 @@ function EditorBody({ workspace, id, doc }: { workspace: Workspace; id: string; 
       }),
       Collaboration.configure({ document: doc, field: 'content' }),
       Spoiler,
+      TextColor,
+      Highlight,
       TaskList,
       Tasks,
       TaskIds,
@@ -551,83 +610,191 @@ function FormatToolbar({
   onLink: () => void;
   onImage?: () => void;
 }) {
-  const button = (label: string, Icon: typeof Bold, action: () => void, active?: boolean) => (
+  /** Открытая палитра: панель прокручивается по горизонтали, поэтому меню — position: fixed. */
+  const [palette, setPalette] = useState<{
+    kind: 'textColor' | 'highlight';
+    top: number;
+    left: number;
+  } | null>(null);
+  const paletteRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!palette) return;
+    const close = (e: Event) => {
+      if (!paletteRef.current?.contains(e.target as Node)) setPalette(null);
+    };
+    const key = (e: KeyboardEvent) => e.key === 'Escape' && setPalette(null);
+    document.addEventListener('pointerdown', close);
+    document.addEventListener('scroll', close, true);
+    document.addEventListener('keydown', key);
+    return () => {
+      document.removeEventListener('pointerdown', close);
+      document.removeEventListener('scroll', close, true);
+      document.removeEventListener('keydown', key);
+    };
+  }, [palette]);
+  const openPalette = (kind: 'textColor' | 'highlight', target: HTMLElement) => {
+    if (palette?.kind === kind) return setPalette(null);
+    const rect = target.getBoundingClientRect();
+    setPalette({
+      kind,
+      top: rect.bottom + 6,
+      left: Math.max(8, Math.min(rect.left - 8, window.innerWidth - 228)),
+    });
+  };
+  const applyColor = (color: NoteColor | null) => {
+    if (!palette) return;
+    const chain = editor.chain().focus();
+    if (color) chain.setMark(palette.kind, { color });
+    else chain.unsetMark(palette.kind);
+    chain.run();
+    setPalette(null);
+  };
+  const current = (kind: 'textColor' | 'highlight'): NoteColor | null => {
+    const color = editor.getAttributes(kind).color;
+    return isNoteColor(color) ? color : null;
+  };
+  const button = (
+    label: string,
+    Icon: typeof Bold,
+    action: (target: HTMLElement) => void,
+    active?: boolean,
+    swatch?: string,
+  ) => (
     <button
       key={label}
       type="button"
       title={label}
       aria-label={label}
       aria-pressed={active}
-      className={`icon-button ${active ? 'active' : ''}`}
+      className={`icon-button ${active ? 'active' : ''} ${swatch ?? ''}`}
       onMouseDown={(e) => e.preventDefault()}
-      onClick={action}
+      onClick={(e) => action(e.currentTarget)}
     >
       <Icon size={18} />
     </button>
   );
+  const textColor = current('textColor'),
+    highlight = editor.isActive('highlight') ? (current('highlight') ?? 'yellow') : null;
   return (
-    <div className="toolbar" data-selection={tick} role="toolbar" aria-label="Форматирование">
-      {button(
-        'Жирный',
-        Bold,
-        () => editor.chain().focus().toggleBold().run(),
-        editor.isActive('bold'),
+    <>
+      <div className="toolbar" data-selection={tick} role="toolbar" aria-label="Форматирование">
+        {button(
+          'Жирный',
+          Bold,
+          () => editor.chain().focus().toggleBold().run(),
+          editor.isActive('bold'),
+        )}
+        {button(
+          'Курсив',
+          Italic,
+          () => editor.chain().focus().toggleItalic().run(),
+          editor.isActive('italic'),
+        )}
+        {button(
+          'Зачёркнутый',
+          Strikethrough,
+          () => editor.chain().focus().toggleStrike().run(),
+          editor.isActive('strike'),
+        )}
+        {button(
+          'Скрытый текст',
+          EyeOff,
+          () => editor.chain().focus().toggleMark('spoiler').run(),
+          editor.isActive('spoiler'),
+        )}
+        {button(
+          'Цвет текста',
+          Baseline,
+          (target) => openPalette('textColor', target),
+          palette?.kind === 'textColor',
+          textColor ? `swatch-text text-color-${textColor}` : undefined,
+        )}
+        {button(
+          'Выделение цветом',
+          Highlighter,
+          (target) => openPalette('highlight', target),
+          palette?.kind === 'highlight',
+          highlight ? `swatch-highlight highlight-${highlight}` : undefined,
+        )}
+        <span className="toolbar-divider" />
+        {button(
+          'Заголовок 2',
+          Heading2,
+          () => editor.chain().focus().toggleHeading({ level: 2 }).run(),
+          editor.isActive('heading', { level: 2 }),
+        )}
+        {button(
+          'Заголовок 3',
+          Heading3,
+          () => editor.chain().focus().toggleHeading({ level: 3 }).run(),
+          editor.isActive('heading', { level: 3 }),
+        )}
+        {button(
+          'Маркированный список',
+          List,
+          () => editor.chain().focus().toggleBulletList().run(),
+          editor.isActive('bulletList'),
+        )}
+        {button(
+          'Нумерованный список',
+          ListOrdered,
+          () => editor.chain().focus().toggleOrderedList().run(),
+          editor.isActive('orderedList'),
+        )}
+        {button(
+          'Список задач',
+          ListTodo,
+          () => editor.chain().focus().toggleTaskList().run(),
+          editor.isActive('taskList'),
+        )}
+        {button('Горизонтальная линия', SeparatorHorizontal, () =>
+          editor.chain().focus().setHorizontalRule().run(),
+        )}
+        <span className="toolbar-divider" />
+        {button('Ссылка', Link, onLink, editor.isActive('link'))}
+        {onImage && button('Вставить изображение', ImagePlus, onImage)}
+        {button('Отменить', Undo2, () => editor.chain().focus().undo().run())}
+        {button('Повторить', Redo2, () => editor.chain().focus().redo().run())}
+      </div>
+      {palette && (
+        <div
+          ref={paletteRef}
+          className="popover color-popover"
+          role="dialog"
+          aria-label={palette.kind === 'textColor' ? 'Цвет текста' : 'Выделение цветом'}
+          style={{ top: palette.top, left: palette.left }}
+        >
+          <div className="color-swatches">
+            {NOTE_COLORS.map((color) => {
+              const selected = (palette.kind === 'textColor' ? textColor : highlight) === color;
+              return (
+                <button
+                  key={color}
+                  type="button"
+                  title={COLOR_LABELS[color]}
+                  aria-label={COLOR_LABELS[color]}
+                  aria-pressed={selected}
+                  className={`color-swatch ${palette.kind === 'textColor' ? `text-color-${color}` : `highlight-${color}`} ${selected ? 'selected' : ''}`}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => applyColor(color)}
+                >
+                  {palette.kind === 'textColor' ? 'А' : ''}
+                </button>
+              );
+            })}
+          </div>
+          <button
+            type="button"
+            className="color-clear"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => applyColor(null)}
+          >
+            <Ban size={16} />
+            {palette.kind === 'textColor' ? 'Обычный цвет' : 'Без выделения'}
+          </button>
+        </div>
       )}
-      {button(
-        'Курсив',
-        Italic,
-        () => editor.chain().focus().toggleItalic().run(),
-        editor.isActive('italic'),
-      )}
-      {button(
-        'Зачёркнутый',
-        Strikethrough,
-        () => editor.chain().focus().toggleStrike().run(),
-        editor.isActive('strike'),
-      )}
-      {button(
-        'Скрытый текст',
-        EyeOff,
-        () => editor.chain().focus().toggleMark('spoiler').run(),
-        editor.isActive('spoiler'),
-      )}
-      <span className="toolbar-divider" />
-      {button(
-        'Заголовок 2',
-        Heading2,
-        () => editor.chain().focus().toggleHeading({ level: 2 }).run(),
-        editor.isActive('heading', { level: 2 }),
-      )}
-      {button(
-        'Заголовок 3',
-        Heading3,
-        () => editor.chain().focus().toggleHeading({ level: 3 }).run(),
-        editor.isActive('heading', { level: 3 }),
-      )}
-      {button(
-        'Маркированный список',
-        List,
-        () => editor.chain().focus().toggleBulletList().run(),
-        editor.isActive('bulletList'),
-      )}
-      {button(
-        'Нумерованный список',
-        ListOrdered,
-        () => editor.chain().focus().toggleOrderedList().run(),
-        editor.isActive('orderedList'),
-      )}
-      {button(
-        'Список задач',
-        ListTodo,
-        () => editor.chain().focus().toggleTaskList().run(),
-        editor.isActive('taskList'),
-      )}
-      <span className="toolbar-divider" />
-      {button('Ссылка', Link, onLink, editor.isActive('link'))}
-      {onImage && button('Вставить изображение', ImagePlus, onImage)}
-      {button('Отменить', Undo2, () => editor.chain().focus().undo().run())}
-      {button('Повторить', Redo2, () => editor.chain().focus().redo().run())}
-    </div>
+    </>
   );
 }
 function LinkDialog({
@@ -713,6 +880,8 @@ export function GuestEditor({
       }),
       Collaboration.configure({ document: doc, field: 'content' }),
       Spoiler,
+      TextColor,
+      Highlight,
       TaskList,
       Tasks,
       TaskIds,
@@ -791,6 +960,8 @@ export function VersionPreview({ doc, userId }: { doc: Y.Doc; userId: string }) 
       extensions: [
         StarterKit.configure({ heading: { levels: [2, 3] }, link: { openOnClick: false } }),
         Spoiler,
+        TextColor,
+        Highlight,
         TaskList,
         Tasks,
         LocalImage.configure({ userId }),
@@ -818,6 +989,8 @@ export function contentExtensions(userId: string) {
   return [
     StarterKit.configure({ heading: { levels: [2, 3] }, link: { openOnClick: false } }),
     Spoiler,
+    TextColor,
+    Highlight,
     TaskList,
     Tasks,
     LocalImage.configure({ userId }),

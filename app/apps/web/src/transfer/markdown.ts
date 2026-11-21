@@ -30,6 +30,8 @@ function inline(nodes: PMNode[] = [], image: (src: string, alt: string) => strin
     if (marks.has('italic')) text = `*${text}*`;
     if (marks.has('strike')) text = `~~${text}~~`;
     if (marks.has('spoiler')) text = `||${text}||`;
+    // выделение — как в Obsidian; цвет текста в Markdown не переносится
+    if (marks.has('highlight')) text = `==${text}==`;
     const link = node.marks?.find((m) => m.type === 'link');
     if (link) text = `[${text}](${String(link.attrs?.href ?? '')})`;
     out += text;
@@ -183,7 +185,7 @@ function inlineHtml(text: string, images: string[], tags: Set<string>): string {
   s = s.replace(/(^|[^_\w])_(?!\s)(.+?)_(?!\w)/g, '$1<em>$2</em>');
   s = s.replace(/~~(.+?)~~/g, '<s>$1</s>');
   s = s.replace(/\|\|(.+?)\|\|/g, '<span data-spoiler="">$1</span>');
-  s = s.replace(/==(.+?)==/g, '$1');
+  s = s.replace(/==(.+?)==/g, '<mark data-highlight="yellow">$1</mark>');
   s = s.replace(/(^|\s)#([\p{L}\p{N}_/-]+)/gu, (all, pre: string, tag: string) => {
     if (/^\d+$/.test(tag)) return all;
     tags.add(tag);

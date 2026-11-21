@@ -7,6 +7,13 @@ import * as Y from 'yjs';
 import { dueDay } from './dates.js';
 import { repeatLabel } from './repeat.js';
 
+/** Палитра цвета текста и подложки: в документе хранится имя, оттенок задаёт CSS темы. */
+export const NOTE_COLORS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'gray'] as const;
+export type NoteColor = (typeof NOTE_COLORS)[number];
+const noteColor = (value: unknown): NoteColor | null =>
+  typeof value === 'string' && (NOTE_COLORS as readonly string[]).includes(value)
+    ? (value as NoteColor)
+    : null;
 export interface RenderOptions {
   /** Адрес картинки для публичной страницы; null — картинку пропустить. */
   image?: (src: string) => string | null;
@@ -66,6 +73,10 @@ function inline(text: Y.XmlText): { html: string; text: string } {
     if (marks.italic) piece = `<em>${piece}</em>`;
     if (marks.strike) piece = `<s>${piece}</s>`;
     if (marks.underline) piece = `<u>${piece}</u>`;
+    const color = noteColor(marks.textColor?.color);
+    if (color) piece = `<span class="text-color-${color}">${piece}</span>`;
+    if (marks.highlight)
+      piece = `<mark class="highlight-${noteColor(marks.highlight.color) ?? 'yellow'}">${piece}</mark>`;
     if (marks.spoiler)
       piece = `<span class="spoiler" data-spoiler tabindex="0" role="button" aria-label="Показать скрытый текст">${piece}</span>`;
     const href = safeHref(marks.link?.href);

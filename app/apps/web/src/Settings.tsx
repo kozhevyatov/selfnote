@@ -1,17 +1,21 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import {
   ArrowLeft,
+  Ban,
   BookCopy,
   Check,
   ChevronRight,
   DatabaseBackup,
   FolderInput,
+  KeyRound,
+  LockOpen,
   LogOut,
   Menu,
   Monitor,
   Moon,
   Palette,
   Sun,
+  Trash2,
   UserRound,
   Users,
   type LucideIcon,
@@ -571,53 +575,62 @@ function UsersSettings({ me, toast }: { me: User; toast: (message: string) => vo
                 </select>
                 {u.id !== me.id && (
                   <>
-                    <button
-                      className="soft-button"
-                      onClick={() => {
-                        setRemoval(null);
-                        setReset(reset?.id === u.id ? null : { id: u.id, password: '' });
-                      }}
-                    >
-                      Пароль
-                    </button>
-                    <button
-                      className="soft-button"
-                      disabled={busy}
-                      title={
-                        u.blocked_at
-                          ? 'Вернуть доступ к аккаунту'
-                          : 'Запретить вход; заметки сохранятся, но станут недоступны и другим'
-                      }
-                      onClick={() => {
-                        const blocked = !u.blocked_at;
-                        if (
-                          blocked &&
-                          !window.confirm(
-                            `Заблокировать ${u.name}? Все его входы завершатся, а общие заметки, гостевые и публичные ссылки перестанут открываться до разблокировки.`,
+                    <span className="user-actions">
+                      <button
+                        className={`icon-button ${reset?.id === u.id ? 'active' : ''}`}
+                        title="Задать новый пароль"
+                        aria-label={`Задать новый пароль: ${u.name}`}
+                        aria-expanded={reset?.id === u.id}
+                        onClick={() => {
+                          setRemoval(null);
+                          setReset(reset?.id === u.id ? null : { id: u.id, password: '' });
+                        }}
+                      >
+                        <KeyRound size={18} />
+                      </button>
+                      <button
+                        className="icon-button"
+                        disabled={busy}
+                        aria-label={`${u.blocked_at ? 'Разблокировать' : 'Заблокировать'}: ${u.name}`}
+                        title={
+                          u.blocked_at
+                            ? 'Разблокировать — вернуть доступ к аккаунту'
+                            : 'Заблокировать — запретить вход; заметки сохранятся, но станут недоступны и другим'
+                        }
+                        onClick={() => {
+                          const blocked = !u.blocked_at;
+                          if (
+                            blocked &&
+                            !window.confirm(
+                              `Заблокировать ${u.name}? Все его входы завершатся, а общие заметки, гостевые и публичные ссылки перестанут открываться до разблокировки.`,
+                            )
                           )
-                        )
-                          return;
-                        void run(async () => {
-                          const result = await api<{ blocked_at: string | null }>(
-                            `/api/admin/users/${u.id}`,
-                            { method: 'PATCH', body: JSON.stringify({ blocked }) },
-                          );
-                          patchUser(u.id, { blocked_at: result.blocked_at });
-                          toast(blocked ? `${u.name} заблокирован` : `${u.name} разблокирован`);
-                        });
-                      }}
-                    >
-                      {u.blocked_at ? 'Разблокировать' : 'Заблокировать'}
-                    </button>
-                    <button
-                      className="soft-button danger-text"
-                      onClick={() => {
-                        setReset(null);
-                        setRemoval(removal?.id === u.id ? null : { id: u.id, confirm: '' });
-                      }}
-                    >
-                      Удалить
-                    </button>
+                            return;
+                          void run(async () => {
+                            const result = await api<{ blocked_at: string | null }>(
+                              `/api/admin/users/${u.id}`,
+                              { method: 'PATCH', body: JSON.stringify({ blocked }) },
+                            );
+                            patchUser(u.id, { blocked_at: result.blocked_at });
+                            toast(blocked ? `${u.name} заблокирован` : `${u.name} разблокирован`);
+                          });
+                        }}
+                      >
+                        {u.blocked_at ? <LockOpen size={18} /> : <Ban size={18} />}
+                      </button>
+                      <button
+                        className={`icon-button danger-text ${removal?.id === u.id ? 'active' : ''}`}
+                        title="Удалить пользователя и его данные"
+                        aria-label={`Удалить: ${u.name}`}
+                        aria-expanded={removal?.id === u.id}
+                        onClick={() => {
+                          setReset(null);
+                          setRemoval(removal?.id === u.id ? null : { id: u.id, confirm: '' });
+                        }}
+                      >
+                        <Trash2 size={18} />
+                      </button>
+                    </span>
                   </>
                 )}
               </div>

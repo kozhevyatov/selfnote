@@ -269,3 +269,88 @@ body {
   font-size: 13px;
   margin-top: 24px;
 }
+
+/* Цвет текста и выделение из заметки. */
+:root {
+  --tc-red: #c62828;
+  --hl-red: #fde2e1;
+  --tc-orange: #c2570c;
+  --hl-orange: #fde8d3;
+  --tc-yellow: #a16207;
+  --hl-yellow: #fdf3b0;
+  --tc-green: #2e7d32;
+  --hl-green: #dcf2dc;
+  --tc-blue: #1d4ed8;
+  --hl-blue: #dce8fd;
+  --tc-purple: #7e22ce;
+  --hl-purple: #eee0fb;
+  --tc-gray: #6b6b72;
+  --hl-gray: #ebebe8;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --tc-red: #ff8a80;
+    --hl-red: #5a2626;
+    --tc-orange: #ffb070;
+    --hl-orange: #5a3a1c;
+    --tc-yellow: #f2cc5c;
+    --hl-yellow: #574a12;
+    --tc-green: #7ad48a;
+    --hl-green: #1f4428;
+    --tc-blue: #8ab4ff;
+    --hl-blue: #1d3358;
+    --tc-purple: #d0a2ff;
+    --hl-purple: #3f2a58;
+    --tc-gray: #a6a6ae;
+    --hl-gray: #3a3a40;
+  }
+}
+.text-color-red {
+  color: var(--tc-red);
+}
+.highlight-red {
+  background: var(--hl-red);
+}
+.text-color-orange {
+  color: var(--tc-orange);
+}
+.highlight-orange {
+  background: var(--hl-orange);
+}
+.text-color-yellow {
+  color: var(--tc-yellow);
+}
+.highlight-yellow {
+  background: var(--hl-yellow);
+}
+.text-color-green {
+  color: var(--tc-green);
+}
+.highlight-green {
+  background: var(--hl-green);
+}
+.text-color-blue {
+  color: var(--tc-blue);
+}
+.highlight-blue {
+  background: var(--hl-blue);
+}
+.text-color-purple {
+  color: var(--tc-purple);
+}
+.highlight-purple {
+  background: var(--hl-purple);
+}
+.text-color-gray {
+  color: var(--tc-gray);
+}
+.highlight-gray {
+  background: var(--hl-gray);
+}
+mark[class^='highlight-'] {
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}

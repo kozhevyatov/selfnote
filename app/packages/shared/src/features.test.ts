@@ -132,3 +132,22 @@ describe('Шифрование', () => {
     await expect(unwrapShareKey(locked, 'нет')).rejects.toBeInstanceOf(WrongPasswordError);
   }, 20000);
 });
+
+describe('цвет текста и выделение', () => {
+  it('рендерит только цвета из палитры и линию', () => {
+    const doc = new Y.Doc();
+    const content = doc.getXmlFragment('content');
+    const p = new Y.XmlElement('paragraph');
+    const text = new Y.XmlText();
+    text.insert(0, 'красный', { textColor: { color: 'red' } });
+    text.insert(7, ' жёлтый', { highlight: { color: 'yellow' } });
+    text.insert(14, ' чужой', { textColor: { color: 'url(x)' } });
+    p.insert(0, [text]);
+    content.insert(0, [p, new Y.XmlElement('horizontalRule')]);
+    const { html } = renderDocument(content);
+    expect(html).toContain('<span class="text-color-red">красный</span>');
+    expect(html).toContain('<mark class="highlight-yellow"> жёлтый</mark>');
+    expect(html).not.toContain('url(x)');
+    expect(html).toContain('<hr>');
+  });
+});
