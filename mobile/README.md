@@ -20,8 +20,26 @@ npm run typecheck
 npx expo start
 ```
 
-На этом этапе хватает Expo Go. Для редактора (следующий этап) понадобится
-development build: `npx expo run:ios` или `eas build --profile development --platform ios`.
+## Редактор
+
+Редактор — TipTap в WebView. Его исходники лежат в вебе (`app/apps/web/src/mobile-editor`),
+схема документа общая с веб-редактором (`app/apps/web/src/editorSchema.ts`) — иначе
+y-prosemirror молча выбросит незнакомые узлы. Собирается в одну HTML-строку:
+
+```bash
+npx expo install react-native-webview   # один раз
+npm run editor                          # = npm run build:mobile-editor -w @selfnote/web
+```
+
+Команда пишет `src/editor/editorHtml.ts` — **этот файл коммитим** (EAS собирает приложение
+без папки app/). Пересобирать после любых правок в `mobile-editor/` или `editorSchema.ts`.
+Пока файл пустой, заметки открываются только для чтения, кнопки «+» нет.
+
+Протокол моста — `app/packages/shared/src/editorBridge.ts`: обновления Yjs ходят
+в обе стороны в base64, сеть и токены остаются в приложении.
+
+Хватает Expo Go (WebView в нём есть). Своя иконка и заставка видны только в собственной
+сборке: `npx expo run:ios` или `eas build --profile development --platform ios`.
 
 ## Вход
 
@@ -56,6 +74,7 @@ mobile/
    ├─ auth.ts          вход, обновление токена, выход
    ├─ session.tsx      аккаунт и рабочее пространство для React
    ├─ sync/            Workspace (Yjs + Hocuspocus) и LocalStore (SQLite)
-   ├─ NoteView.tsx     просмотр заметки из Y.XmlFragment (до редактора)
+   ├─ editor/          NoteEditor (WebView + мост), Toolbar, LinkDialog, editorHtml (сборка)
+   ├─ NoteView.tsx     просмотр заметки без редактора (пока editorHtml не собран)
    └─ theme.ts, ui.tsx, dates.ts
 ```

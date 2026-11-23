@@ -5,6 +5,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ChevronLeft, Lock, Users } from 'lucide-react-native';
 import { useWorkspace } from '../../../src/session';
 import { changedLabel } from '../../../src/dates';
+import { NoteEditor, editorAvailable } from '../../../src/editor/NoteEditor';
 import { NoteView } from '../../../src/NoteView';
 import { OfflineBanner } from '../../../src/ui';
 import { fonts, useTheme } from '../../../src/theme';
@@ -14,11 +15,11 @@ export default function NoteScreen() {
   const { c } = theme;
   const insets = useSafeAreaInsets();
   const workspace = useWorkspace();
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id, created } = useLocalSearchParams<{ id: string; created?: string }>();
   const note = workspace.metadata.get(id);
   const [ready, setReady] = useState(workspace.isLoaded(id));
-
   const openable = !!note && !note.encrypted;
+
   useEffect(() => {
     if (!openable) return;
     let alive = true;
@@ -27,6 +28,8 @@ export default function NoteScreen() {
       alive = false;
     };
   }, [id, openable, workspace]);
+  // Пустую новую заметку не оставляем в списке.
+  useEffect(() => () => workspace.discardIfEmpty(id), [id, workspace]);
 
   const back = () => (router.canGoBack() ? router.back() : router.replace('/'));
   const notebook = workspace.notebook(note?.notebookId);
@@ -41,54 +44,53 @@ export default function NoteScreen() {
           <ChevronLeft color={theme.accentText} size={26} strokeWidth={2.2} />
           <Text style={[styles.backText, { color: theme.accentText }]}>Заметки</Text>
         </Pressable>
+        <View style={styles.meta}>
+          {workspace.isCollaborative(id) ? (
+            <View style={styles.flag}>
+              <Users color={c.secondary} size={15} />
+              <Text style={[styles.flagText, { color: c.secondary }]}>
+                {editable ? 'Совместная' : 'Только чтение'}
+              </Text>
+            </View>
+          ) : null}
+          {place ? (
+            <View style={[styles.place, { backgroundColor: theme.tint }]}>
+              <View style={[styles.swatch, { backgroundColor: notebook?.color || theme.accent }]} />
+              <Text style={[styles.placeText, { color: theme.accentText }]} numberOfLines={1}>
+                {place}
+              </Text>
+            </View>
+          ) : null}
+        </View>
       </View>
       <OfflineBanner workspace={workspace} />
       {!note ? (
-        <Text style={[styles.missing, { color: c.secondary }]}>
-          Заметка удалена или доступ к ней закрыт.
-        </Text>
+        <Text style={[styles.missing, { color: c.secondary }]}>Заметка удалена или доступ к ней закрыт.</Text>
+      ) : note.encrypted ? (
+        <View style={[styles.locked, { backgroundColor: c.soft }]}>
+          <Lock color={c.secondary} size={26} />
+          <Text style={[styles.lockedText, { color: c.secondary }]}>
+            Заметка защищена паролем. Такие заметки приложение пока не открывает — откройте её в
+            веб-версии.
+          </Text>
+        </View>
+      ) : !ready ? (
+        <ActivityIndicator style={{ marginTop: 40 }} />
+      ) : editorAvailable ? (
+        <View style={{ flex: 1 }}>
+          <NoteEditor workspace={workspace} id={id} doc={workspace.note(id).doc} focusTitle={created === '1'} />
+        </View>
       ) : (
         <ScrollView contentContainerStyle={[styles.page, { paddingBottom: insets.bottom + 40 }]}>
-          <View style={styles.meta}>
-            {place ? (
-              <View style={[styles.place, { backgroundColor: theme.tint }]}>
-                <View style={[styles.swatch, { backgroundColor: notebook?.color || theme.accent }]} />
-                <Text style={[styles.placeText, { color: theme.accentText }]} numberOfLines={1}>
-                  {place}
-                </Text>
-              </View>
-            ) : null}
-            {workspace.isCollaborative(id) ? (
-              <View style={styles.flag}>
-                <Users color={c.secondary} size={15} />
-                <Text style={[styles.flagText, { color: c.secondary }]}>
-                  {editable ? 'Совместная' : 'Только чтение'}
-                </Text>
-              </View>
-            ) : null}
-          </View>
           <Text style={[styles.title, { color: c.text }]} accessibilityRole="header">
-            {note.encrypted && note.hideTitle ? 'Заметка под паролем' : note.title || 'Без названия'}
+            {note.title || 'Без названия'}
           </Text>
           <Text style={[styles.changed, { color: c.muted }]}>{changedLabel(note.updatedAt)}</Text>
-
-          {note.encrypted ? (
-            <View style={[styles.locked, { backgroundColor: c.soft }]}>
-              <Lock color={c.secondary} size={26} />
-              <Text style={[styles.lockedText, { color: c.secondary }]}>
-                Заметка защищена паролем. Открытие таких заметок появится в приложении на следующем шаге —
-                пока откройте её в веб-версии.
-              </Text>
-            </View>
-          ) : !ready ? (
-            <ActivityIndicator style={{ marginTop: 40 }} />
-          ) : (
-            <NoteView
-              doc={workspace.note(id).doc}
-              canEdit={editable}
-              onTask={(taskId, checked) => workspace.setTask(id, taskId, checked)}
-            />
-          )}
+          <NoteView
+            doc={workspace.note(id).doc}
+            canEdit={editable}
+            onTask={(taskId, checked) => workspace.setTask(id, taskId, checked)}
+          />
         </ScrollView>
       )}
     </View>
@@ -96,27 +98,19 @@ export default function NoteScreen() {
 }
 
 const styles = StyleSheet.create({
-  bar: { paddingHorizontal: 8, paddingBottom: 4 },
-  back: { flexDirection: 'row', alignItems: 'center', height: 44, alignSelf: 'flex-start', paddingRight: 10 },
+  bar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, paddingBottom: 4, gap: 8 },
+  back: { flexDirection: 'row', alignItems: 'center', height: 44, paddingRight: 6 },
   backText: { fontFamily: fonts.medium, fontSize: 17 },
-  page: { paddingHorizontal: 22, paddingTop: 6 },
-  meta: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 10 },
-  place: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 11,
-    paddingVertical: 5,
-    borderRadius: 999,
-    maxWidth: '100%',
-  },
+  meta: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 10, paddingRight: 8 },
+  place: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 11, paddingVertical: 5, borderRadius: 999, flexShrink: 1 },
   swatch: { width: 9, height: 9, borderRadius: 3 },
-  placeText: { fontFamily: fonts.semibold, fontSize: 14 },
+  placeText: { fontFamily: fonts.semibold, fontSize: 14, flexShrink: 1 },
   flag: { flexDirection: 'row', alignItems: 'center', gap: 5 },
   flagText: { fontFamily: fonts.medium, fontSize: 14 },
-  title: { fontFamily: fonts.heavy, fontSize: 32, lineHeight: 36, letterSpacing: -1.1, marginTop: 14 },
+  page: { paddingHorizontal: 22, paddingTop: 6 },
+  title: { fontFamily: fonts.heavy, fontSize: 32, lineHeight: 36, letterSpacing: -1.1, marginTop: 6 },
   changed: { fontFamily: fonts.regular, fontSize: 14, marginTop: 4, marginBottom: 18 },
   missing: { fontFamily: fonts.medium, fontSize: 16, textAlign: 'center', padding: 40 },
-  locked: { alignItems: 'center', gap: 12, padding: 24, borderRadius: 20, marginTop: 10 },
+  locked: { alignItems: 'center', gap: 12, padding: 24, borderRadius: 20, margin: 22 },
   lockedText: { fontFamily: fonts.regular, fontSize: 16, lineHeight: 23, textAlign: 'center' },
 });

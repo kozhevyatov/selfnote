@@ -36,10 +36,10 @@ function Inline({ node, theme, muted }: { node: Y.XmlElement; theme: Theme; mute
         const a = part.attributes ?? {};
         const key = `${index}-${i}`;
         const style = [
-          a.bold && { fontFamily: fonts.bold },
-          a.italic && { fontStyle: 'italic' as const },
-          a.strike && { textDecorationLine: 'line-through' as const, color: theme.c.muted },
-          a.code && { fontFamily: 'Menlo', backgroundColor: theme.c.soft },
+          a.bold ? { fontFamily: fonts.bold } : null,
+          a.italic ? { fontStyle: 'italic' as const } : null,
+          a.strike ? { textDecorationLine: 'line-through' as const, color: theme.c.muted } : null,
+          a.code ? { fontFamily: 'Menlo', backgroundColor: theme.c.soft } : null,
         ];
         if (a.spoiler) parts.push(<Spoiler key={key} text={part.insert} theme={theme} />);
         else if (a.link) {

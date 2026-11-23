@@ -8,7 +8,8 @@
     "ios": "expo run:ios",
     "android": "expo run:android",
     "typecheck": "tsc --noEmit",
-    "doctor": "npx expo-doctor"
+    "doctor": "npx expo-doctor",
+    "editor": "npm --prefix ../app run build:mobile-editor -w @selfnote/web"
   },
   "dependencies": {
     "@expo-google-fonts/golos-text": "^0.4.2",
