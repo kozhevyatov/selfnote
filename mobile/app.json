@@ -61,6 +61,17 @@
     "experiments": {
       "typedRoutes": false
     },
-    "icon": "./assets/icon.png"
+    "icon": "./assets/icon.png",
+    "extra": {
+      "router": {
+        "asyncRoutes": {
+          "web": true
+        }
+      },
+      "eas": {
+        "projectId": "4e12ea4d-5c1c-4225-837d-c0301b355c16"
+      }
+    },
+    "owner": "nskarl"
   }
 }
