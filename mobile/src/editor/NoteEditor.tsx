@@ -4,7 +4,7 @@
  * в обе стороны, сеть и офлайн-хранилище остаются на стороне приложения.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { KeyboardAvoidingView, Linking, Platform, StyleSheet, View } from 'react-native';
+import { Keyboard, Linking, Platform, StyleSheet, View } from 'react-native';
 import { WebView, type WebViewMessageEvent, type WebViewProps } from 'react-native-webview';
 import * as Y from 'yjs';
 import {
@@ -72,6 +72,22 @@ export function NoteEditor({
   const [active, setActive] = useState<EditorActive>({});
   const [link, setLink] = useState<string | null>(null);
   const [linkDialog, setLinkDialog] = useState(false);
+  // Высота клавиатуры: панель ставим вплотную над ней (KeyboardAvoidingView здесь не помог —
+  // WKWebView сам сдвигает содержимое, и панель уезжала под клавиатуру).
+  const [keyboard, setKeyboard] = useState(0);
+  useEffect(() => {
+    const ios = Platform.OS === 'ios';
+    const show = Keyboard.addListener(ios ? 'keyboardWillShow' : 'keyboardDidShow', (event) =>
+      setKeyboard(event.endCoordinates.height),
+    );
+    const hide = Keyboard.addListener(ios ? 'keyboardWillHide' : 'keyboardDidHide', () =>
+      setKeyboard(0),
+    );
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
   const note = workspace.metadata.get(id);
   const title = note?.title ?? '';
   const editable = workspace.canEdit(id);
@@ -152,12 +168,8 @@ export function NoteEditor({
 
   const command = (name: EditorCommand) => send({ type: 'command', command: name });
   return (
-    <KeyboardAvoidingView
-      style={{ flex: 1 }}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={0}
-    >
-      <View style={{ flex: 1, backgroundColor: theme.c.panel }}>
+    <View style={{ flex: 1, backgroundColor: theme.c.panel }}>
+      <View style={{ flex: 1 }}>
         <EditorWebView
           ref={webview}
           source={{ html: editorHtml }}
@@ -184,13 +196,18 @@ export function NoteEditor({
           webviewDebuggingEnabled={__DEV__}
         />
       </View>
-      {editable && focus ? (
-        <Toolbar
-          area={focus}
+      {editable && keyboard > 0 && !linkDialog ? (
+        <View
+          style={[styles.toolbar, { bottom: Platform.OS === 'ios' ? keyboard : 0 }]}
+          pointerEvents="box-none"
+        >
+          <Toolbar
+          area={focus ?? 'body'}
           active={active}
           onCommand={command}
           onLink={() => setLinkDialog(true)}
-        />
+          />
+        </View>
       ) : null}
       <LinkDialog
         visible={linkDialog}
@@ -201,10 +218,11 @@ export function NoteEditor({
           send({ type: 'link', href });
         }}
       />
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   web: { flex: 1 },
+  toolbar: { position: 'absolute', left: 0, right: 0 },
 });

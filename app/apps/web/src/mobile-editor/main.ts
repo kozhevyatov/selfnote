@@ -282,6 +282,9 @@ function create(isEditable: boolean) {
     ],
     editorProps: {
       attributes: { 'aria-label': 'Текст заметки', class: 'note-body' },
+      // над клавиатурой висит панель приложения (~50 px) — строка с курсором не должна под ней прятаться
+      scrollThreshold: { top: 40, bottom: 90, left: 0, right: 0 },
+      scrollMargin: { top: 40, bottom: 90, left: 0, right: 0 },
       handleClick: (_view, _pos, event) => {
         const target = event.target as HTMLElement;
         const spoiler = target.closest('[data-spoiler]');
