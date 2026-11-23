@@ -7,7 +7,7 @@
       "android"
     ],
     "scheme": "selfnote",
-    "version": "0.1.0",
+    "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
     "backgroundColor": "#ECEBE7",
@@ -55,7 +55,8 @@
           "cameraPermission": "SelfNote снимает фото, чтобы добавить его в заметку.",
           "microphonePermission": false
         }
-      ]
+      ],
+      "expo-notifications"
     ],
     "experiments": {
       "typedRoutes": false

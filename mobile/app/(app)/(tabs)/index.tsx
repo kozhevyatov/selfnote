@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Pin, Search, X } from 'lucide-react-native';
+import { Pin, Plus, Search, X } from 'lucide-react-native';
+import { editorAvailable } from '../../../src/editor/NoteEditor';
+import { NoteMenu } from '../../../src/NoteMenu';
 import { searchTerms } from '@selfnote/shared';
 import { useSession, useWorkspace } from '../../../src/session';
 import { groupByDay, todayLabel } from '../../../src/dates';
@@ -21,6 +23,7 @@ export default function Notes() {
   const [query, setQuery] = useState('');
   const [refreshing, setRefreshing] = useState(false);
   const [menu, setMenu] = useState<string | null>(null);
+  const [tag, setTag] = useState<string | null>(null);
 
   useEffect(() => {
     setNotebookId(params.notebook ?? null);
@@ -41,6 +44,7 @@ export default function Notes() {
   const notes = workspace.visibleNotes().filter((note) => {
     if (notebookId && note.notebookId !== notebookId) return false;
     if (sectionId && note.sectionId !== sectionId) return false;
+    if (tag && !note.tags?.includes(tag)) return false;
     if (!terms.length) return true;
     const haystack = (note.title + ' ' + workspace.extract(note.id).plainText).toLowerCase();
     return terms.every((t) => haystack.includes(t));
@@ -48,9 +52,14 @@ export default function Notes() {
   const pinned = terms.length ? [] : notes.filter((n) => n.pinned);
   const rest = terms.length ? notes : notes.filter((n) => !n.pinned);
   const groups = groupByDay(rest);
-  const tasks = terms.length || notebookId ? [] : workspace.todayTasks().slice(0, 5);
+  const tasks = terms.length || notebookId || tag ? [] : workspace.todayTasks().slice(0, 5);
+  const tags = workspace.tags();
 
   const open = (id: string) => router.push({ pathname: '/note/[id]', params: { id } });
+  const newNote = () => {
+    const created = workspace.addNote(notebookId, sectionId);
+    router.push({ pathname: '/note/[id]', params: { id: created, created: '1' } });
+  };
   const chip = (active: boolean) => [
     styles.chip,
     active ? { backgroundColor: c.strong } : { backgroundColor: c.panel, borderColor: c.border, borderWidth: 1 },
@@ -60,7 +69,7 @@ export default function Notes() {
   return (
     <View style={{ flex: 1, backgroundColor: c.background }}>
       <ScrollView
-        contentContainerStyle={{ paddingTop: insets.top + 10, paddingBottom: 32 }}
+        contentContainerStyle={{ paddingTop: insets.top + 10, paddingBottom: 110 }}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
         stickyHeaderIndices={[1]}
@@ -134,16 +143,17 @@ export default function Notes() {
             accessibilityLabel="Записные книжки"
           >
             <Pressable
-              style={chip(!notebookId)}
+              style={chip(!notebookId && !tag)}
               onPress={() => {
                 setNotebookId(null);
                 setSectionId(null);
+                setTag(null);
               }}
               accessibilityRole="button"
-              accessibilityState={{ selected: !notebookId }}
+              accessibilityState={{ selected: !notebookId && !tag }}
             >
-              <Text style={chipText(!notebookId)}>Все</Text>
-              <Text style={[chipText(!notebookId), { opacity: 0.7 }]}>
+              <Text style={chipText(!notebookId && !tag)}>Все</Text>
+              <Text style={[chipText(!notebookId && !tag), { opacity: 0.7 }]}>
                 {workspace.visibleNotes().length}
               </Text>
             </Pressable>
@@ -162,6 +172,20 @@ export default function Notes() {
                 >
                   <View style={[styles.swatch, { backgroundColor: nb.color || theme.accent }]} />
                   <Text style={chipText(active)}>{nb.name}</Text>
+                </Pressable>
+              );
+            })}
+            {tags.map((name) => {
+              const active = tag === name;
+              return (
+                <Pressable
+                  key={`tag:${name}`}
+                  style={chip(active)}
+                  onPress={() => setTag(active ? null : name)}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: active }}
+                >
+                  <Text style={chipText(active)}>#{name}</Text>
                 </Pressable>
               );
             })}
@@ -264,13 +288,42 @@ export default function Notes() {
               <Text style={[styles.emptyTitle, { color: c.text }]}>Здесь пока пусто</Text>
               <Text style={[styles.emptyText, { color: c.secondary }]}>
                 {workspace.connection === 'online'
-                  ? 'Создавайте заметки в веб-версии — они появятся здесь.'
+                  ? 'Нажмите «+», чтобы создать первую заметку.'
                   : 'Заметки загрузятся, когда появится связь с сервером.'}
               </Text>
             </View>
           ) : null}
         </View>
       </ScrollView>
+      {editorAvailable ? (
+        <Pressable
+          onPress={newNote}
+          onLongPress={() =>
+            Alert.alert('Создать', undefined, [
+              { text: 'Заметку', onPress: newNote },
+              {
+                text: 'Запись паролей',
+                onPress: () =>
+                  router.push({
+                    pathname: '/passwords-new',
+                    params: { notebook: notebookId ?? '', section: sectionId ?? '' },
+                  }),
+              },
+              { text: 'Отмена', style: 'cancel' },
+            ])
+          }
+          accessibilityRole="button"
+          accessibilityLabel="Новая заметка"
+          accessibilityHint="Долгое нажатие — запись паролей"
+          style={({ pressed }) => [
+            styles.fab,
+            { backgroundColor: theme.accent, shadowColor: theme.accent, opacity: pressed ? 0.85 : 1 },
+          ]}
+        >
+          <Plus color="#FFFFFF" size={28} strokeWidth={2.4} />
+        </Pressable>
+      ) : null}
+      <NoteMenu id={menu} onClose={() => setMenu(null)} />
     </View>
   );
 }
@@ -337,6 +390,20 @@ const styles = StyleSheet.create({
   task: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 52, paddingVertical: 8 },
   taskText: { fontFamily: fonts.regular, fontSize: 16 },
   taskNote: { fontFamily: fonts.regular, fontSize: 13, marginTop: 1 },
+  fab: {
+    position: 'absolute',
+    right: 20,
+    bottom: 20,
+    width: 60,
+    height: 60,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowOpacity: 0.35,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 6,
+  },
   empty: { alignItems: 'center', paddingVertical: 60, paddingHorizontal: 30, gap: 8 },
   emptyTitle: { fontFamily: fonts.bold, fontSize: 20 },
   emptyText: { fontFamily: fonts.regular, fontSize: 16, textAlign: 'center', lineHeight: 22 },

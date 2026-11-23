@@ -107,9 +107,15 @@ export function NoteRow({
 }) {
   const theme = useTheme();
   const { c } = theme;
-  const title = note.encrypted && note.hideTitle ? 'Заметка под паролем' : note.title || 'Без названия';
-  const preview = note.encrypted
-    ? 'Защищена паролем'
+  const isPasswords = note.kind === 'passwords';
+  const title =
+    note.encrypted && note.hideTitle
+      ? workspace.noteTitle(note.id) || (isPasswords ? 'Пароли' : 'Заметка под паролем')
+      : note.title || 'Без названия';
+  const preview = isPasswords
+    ? 'Хранилище паролей'
+    : note.encrypted
+      ? 'Защищена паролем'
     : workspace.extract(note.id).plainText.replace(/\s+/g, ' ').trim() ||
       (workspace.isLoaded(note.id) ? 'Пустая заметка' : ' ');
   const notebook = workspace.notebook(note.notebookId);

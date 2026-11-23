@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { router } from 'expo-router';
+import { ChevronDown, ChevronUp } from 'lucide-react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { dueDay, localDate } from '@selfnote/shared';
 import { useWorkspace } from '../../../src/session';
@@ -14,6 +15,7 @@ export default function Tasks() {
   const insets = useSafeAreaInsets();
   const workspace = useWorkspace();
   const [showDone, setShowDone] = useState(false);
+  const [reorder, setReorder] = useState(false);
   const today = localDate();
   const all = workspace.allTasks();
   const open = all.filter((t) => !t.checked);
@@ -22,14 +24,30 @@ export default function Tasks() {
     { title: 'Просрочено', items: open.filter((t) => t.due && dueDay(t.due) < today).sort(byDue) },
     { title: 'Сегодня', items: open.filter((t) => t.due && dueDay(t.due) === today) },
     { title: 'Предстоящие', items: open.filter((t) => t.due && dueDay(t.due) > today).sort(byDue) },
-    { title: 'Без срока', items: open.filter((t) => !t.due) },
+    {
+      title: 'Без срока',
+      // ручной порядок (как в вебе): сначала упорядоченные, остальные — как в заметках
+      items: open
+        .filter((t) => !t.due)
+        .map((t, index) => ({ t, index }))
+        .sort((a, b) => (a.t.order ?? Infinity) - (b.t.order ?? Infinity) || a.index - b.index)
+        .map((e) => e.t),
+    },
   ];
   const done = all
     .filter((t) => t.checked)
     .sort((a, b) => (b.doneAt ?? '').localeCompare(a.doneAt ?? ''))
     .slice(0, 50);
 
-  const row = (task: TaskRow, index: number) => (
+  const noDue = groups[3].items;
+  const move = (index: number, delta: number) => {
+    const keys = noDue.map((t) => `${t.noteId}:${t.id}`);
+    const target = index + delta;
+    if (target < 0 || target >= keys.length) return;
+    [keys[index], keys[target]] = [keys[target], keys[index]];
+    workspace.setTaskOrder(keys);
+  };
+  const row = (task: TaskRow, index: number, movable = false) => (
     <View
       key={task.noteId + task.id}
       style={[styles.task, index > 0 && { borderTopWidth: 1, borderTopColor: c.line }]}
@@ -58,6 +76,28 @@ export default function Tasks() {
         </Text>
       </Pressable>
       {task.due && !task.checked ? <DueBadge due={task.due} /> : null}
+      {movable ? (
+        <View style={styles.arrows}>
+          <Pressable
+            onPress={() => move(index, -1)}
+            disabled={index === 0}
+            style={[styles.arrow, index === 0 && { opacity: 0.3 }]}
+            accessibilityRole="button"
+            accessibilityLabel="Выше"
+          >
+            <ChevronUp color={c.text} size={20} />
+          </Pressable>
+          <Pressable
+            onPress={() => move(index, 1)}
+            disabled={index === noDue.length - 1}
+            style={[styles.arrow, index === noDue.length - 1 && { opacity: 0.3 }]}
+            accessibilityRole="button"
+            accessibilityLabel="Ниже"
+          >
+            <ChevronDown color={c.text} size={20} />
+          </Pressable>
+        </View>
+      ) : null}
     </View>
   );
 
@@ -75,8 +115,16 @@ export default function Tasks() {
           .filter((g) => g.items.length)
           .map((g) => (
             <View key={g.title}>
-              <SectionTitle title={g.title} hint={String(g.items.length)} />
-              <Card style={{ paddingHorizontal: 16 }}>{g.items.map(row)}</Card>
+              {g.title === 'Без срока' && g.items.length > 1 ? (
+                <Pressable onPress={() => setReorder((v) => !v)} accessibilityRole="button">
+                  <SectionTitle title={g.title} hint={reorder ? 'Готово' : 'Порядок'} />
+                </Pressable>
+              ) : (
+                <SectionTitle title={g.title} hint={String(g.items.length)} />
+              )}
+              <Card style={{ paddingHorizontal: 16 }}>
+                {g.items.map((t, i) => row(t, i, reorder && g.title === 'Без срока'))}
+              </Card>
             </View>
           ))}
         {!open.length ? (
@@ -87,7 +135,9 @@ export default function Tasks() {
             <Pressable onPress={() => setShowDone((v) => !v)} accessibilityRole="button">
               <SectionTitle title={showDone ? 'Скрыть выполненные' : 'Показать выполненные'} hint={String(done.length)} />
             </Pressable>
-            {showDone ? <Card style={{ paddingHorizontal: 16 }}>{done.map(row)}</Card> : null}
+            {showDone ? (
+              <Card style={{ paddingHorizontal: 16 }}>{done.map((t, i) => row(t, i))}</Card>
+            ) : null}
           </View>
         ) : null}
       </View>
@@ -101,5 +151,7 @@ const styles = StyleSheet.create({
   task: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 54, paddingVertical: 8 },
   text: { fontFamily: fonts.regular, fontSize: 16 },
   note: { fontFamily: fonts.regular, fontSize: 13, marginTop: 1 },
+  arrows: { flexDirection: 'row' },
+  arrow: { width: 36, height: 40, alignItems: 'center', justifyContent: 'center' },
   empty: { fontFamily: fonts.medium, fontSize: 16, textAlign: 'center', paddingVertical: 40 },
 });

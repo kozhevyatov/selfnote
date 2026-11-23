@@ -27,7 +27,7 @@ npx expo start
 y-prosemirror молча выбросит незнакомые узлы. Собирается в одну HTML-строку:
 
 ```bash
-npx expo install react-native-webview expo-image-picker expo-file-system   # один раз
+npx expo install react-native-webview expo-image-picker expo-file-system expo-notifications   # один раз
 npm run editor                          # = npm run build:mobile-editor -w @selfnote/web
 ```
 
@@ -50,17 +50,34 @@ npm run editor                          # = npm run build:mobile-editor -w @self
 
 Для сервера в домашней сети по `http://192.168.…` на iOS включён `NSAllowsLocalNetworking`.
 
-## Сборка в App Store
+## Сборка в TestFlight
+
+EAS собирает приложение в облаке Expo из Git-репозитория целиком (нужны `mobile/` и
+`app/packages/shared/src`), поэтому перед сборкой всё должно быть **закоммичено**,
+включая `src/editor/editorHtml.ts`.
+
+Один раз:
 
 ```bash
 npm install -g eas-cli
-eas login
-eas build:configure      # один раз, привяжет проект к аккаунту Expo
-eas build --platform ios --profile production
-eas submit --platform ios
+eas login                 # аккаунт expo.dev
+cd mobile
+eas init                  # создаст проект на expo.dev и пропишет projectId в app.json
 ```
 
-Bundle ID: `ru.nskarl.selfnote` (app.json).
+Сборка и отправка в TestFlight:
+
+```bash
+eas build --platform ios --profile production --auto-submit
+```
+
+При первой сборке EAS спросит Apple ID, сам создаст сертификат, профиль и включит
+push-уведомления для `ru.nskarl.selfnote`; при отправке — создаст приложение
+в App Store Connect, если его ещё нет. Сборка идёт ~15–25 минут, потом Apple
+обрабатывает её ещё 5–15 минут, и она появляется в TestFlight.
+
+Номер сборки EAS увеличивает сам (`appVersionSource: remote`), версия — `version`
+в app.json. Новая версия в TestFlight — та же команда.
 
 ## Структура
 
@@ -75,6 +92,8 @@ mobile/
    ├─ session.tsx      аккаунт и рабочее пространство для React
    ├─ sync/            Workspace (Yjs + Hocuspocus) и LocalStore (SQLite)
    ├─ editor/          NoteEditor (WebView + мост), Toolbar, LinkDialog, editorHtml (сборка)
+   ├─ crypto/          CryptoHost — crypto.subtle через невидимый WebView (заметки под паролем)
+   ├─ reminders.ts     локальные напоминания о задачах
    ├─ NoteView.tsx     просмотр заметки без редактора (пока editorHtml не собран)
    └─ theme.ts, ui.tsx, dates.ts
 ```

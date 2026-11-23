@@ -44,6 +44,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     const subscription = AppState.addEventListener('change', (state) => {
       if (state === 'active') workspace.wake();
       else void workspace.persist();
+      // «inactive» бывает и при открытой галерее — закрываем только при настоящем уходе в фон
+      if (state === 'background') workspace.lockSecure();
     });
     return () => subscription.remove();
   }, [workspace]);

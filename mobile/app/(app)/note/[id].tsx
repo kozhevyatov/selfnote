@@ -4,6 +4,8 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ChevronLeft, Ellipsis, Lock, Users } from 'lucide-react-native';
 import { NoteMenu } from '../../../src/NoteMenu';
+import { UnlockNote } from '../../../src/UnlockNote';
+import { PasswordsNote } from '../../../src/passwords/PasswordsNote';
 import { useWorkspace } from '../../../src/session';
 import { changedLabel } from '../../../src/dates';
 import { NoteEditor, editorAvailable } from '../../../src/editor/NoteEditor';
@@ -80,14 +82,22 @@ export default function NoteScreen() {
       <NoteMenu id={menu ? id : null} onClose={() => setMenu(false)} onTrashed={back} />
       {!note ? (
         <Text style={[styles.missing, { color: c.secondary }]}>Заметка удалена или доступ к ней закрыт.</Text>
+      ) : note.kind === 'passwords' ? (
+        <PasswordsNote workspace={workspace} id={id} />
       ) : note.encrypted ? (
-        <View style={[styles.locked, { backgroundColor: c.soft }]}>
-          <Lock color={c.secondary} size={26} />
-          <Text style={[styles.lockedText, { color: c.secondary }]}>
-            Заметка защищена паролем. Такие заметки приложение пока не открывает — откройте её в
-            веб-версии.
-          </Text>
-        </View>
+        workspace.secure.isUnlocked(id) && editorAvailable ? (
+          <View style={{ flex: 1 }}>
+            <NoteEditor
+              key={`secure-${id}`}
+              workspace={workspace}
+              id={id}
+              doc={workspace.secure.doc(id)!}
+              focusTitle={false}
+            />
+          </View>
+        ) : (
+          <UnlockNote workspace={workspace} id={id} />
+        )
       ) : !ready ? (
         <ActivityIndicator style={{ marginTop: 40 }} />
       ) : editorAvailable ? (

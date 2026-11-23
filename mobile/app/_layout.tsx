@@ -12,6 +12,7 @@ import {
   GolosText_800ExtraBold,
 } from '@expo-google-fonts/golos-text';
 import { SessionProvider, useSession } from '../src/session';
+import { CryptoHost } from '../src/crypto/CryptoHost';
 import { useTheme } from '../src/theme';
 
 void SplashScreen.preventAutoHideAsync();
@@ -54,6 +55,7 @@ export default function Layout() {
     <SafeAreaProvider>
       <SessionProvider>
         <Root />
+        <CryptoHost />
       </SessionProvider>
     </SafeAreaProvider>
   );

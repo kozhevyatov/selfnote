@@ -98,8 +98,7 @@ export function NoteEditor({
       hide.remove();
     };
   }, []);
-  const note = workspace.metadata.get(id);
-  const title = note?.title ?? '';
+  const title = workspace.noteTitle(id);
   const editable = workspace.canEdit(id);
   const themeKey = JSON.stringify(editorTheme(theme));
 
@@ -136,7 +135,7 @@ export function NoteEditor({
         send({
           type: 'init',
           state: toBase64(Y.encodeStateAsUpdate(doc)),
-          title: workspace.metadata.get(id)?.title ?? initial.title,
+          title: workspace.noteTitle(id) || initial.title,
           titlePlaceholder: 'Без названия',
           editable,
           theme: editorTheme(theme),

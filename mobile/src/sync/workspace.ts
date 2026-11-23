@@ -18,6 +18,8 @@ import {
 import { api, socketUrl, token } from '../auth';
 import { LocalStore } from './localStore';
 import { Images } from './images';
+import { SecureNotes, secureTitle } from './secure';
+import { PasswordVault } from './vault';
 import { uuid } from '../ids';
 
 type Extracted = ReturnType<typeof extractDocument>;
@@ -32,6 +34,8 @@ export interface Entry {
 export interface TaskRow extends Task {
   noteId: string;
   noteTitle: string;
+  /** Ручной порядок во вкладке «Задачи» (карта taskOrder, как в вебе). */
+  order?: number;
 }
 
 const EMPTY: Extracted = { plainText: '', tasks: [] };
@@ -52,6 +56,8 @@ export class Workspace {
   private stopped = false;
   private collaborationTimer: ReturnType<typeof setInterval>;
   private readonly images: Images;
+  readonly secure: SecureNotes;
+  readonly vault: PasswordVault;
   collaboration: CollaborationList = { notes: [], owned: [] };
   connection: Connection = 'connecting';
   /** Есть изменения, ещё не подтверждённые сервером. */
@@ -70,6 +76,7 @@ export class Workspace {
         status === 'connected' ? 'online' : status === 'connecting' ? 'connecting' : 'offline';
       if (status === 'connected') {
         void this.refreshCollaboration();
+        void this.secure.sync();
         setTimeout(() => void this.uploadImages(), 3000);
       }
       this.emit();
@@ -90,6 +97,29 @@ export class Workspace {
       }
     });
     this.images = new Images(server, store, userId);
+    const self = this; // eslint-disable-line @typescript-eslint/no-this-alias
+    this.secure = new SecureNotes(
+      {
+        get metadata() {
+          return self.metadata;
+        },
+        online: () => this.connection === 'online',
+        addEncrypted: (id, meta) => this.addEncrypted(id, meta),
+        emit: () => this.emit(),
+      },
+      store,
+    );
+    this.vault = new PasswordVault(
+      {
+        get metadata() {
+          return self.metadata;
+        },
+        online: () => this.connection === 'online',
+        emit: () => this.emit(),
+      },
+      this.secure,
+      store,
+    );
     this.collaborationTimer = setInterval(() => {
       void this.refreshCollaboration();
       void this.uploadImages();
@@ -195,10 +225,10 @@ export class Workspace {
     }
     return this.metaCache;
   }
-  /** Живые заметки (без корзины и сейфа паролей), свежие первыми. */
+  /** Живые заметки (без корзины), свежие первыми. Записи паролей — тоже заметки. */
   visibleNotes(): Note[] {
     return [...this.metadata.values()]
-      .filter((n) => !n.deletedAt && n.kind !== 'passwords')
+      .filter((n) => !n.deletedAt)
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
   private sorted<T extends { id: string }>(items: T[]): T[] {
@@ -264,13 +294,55 @@ export class Workspace {
   }
   /** Все задачи для вкладки «Задачи». */
   allTasks(): TaskRow[] {
+    const order = this.space.doc.getMap<number>('taskOrder');
     const rows: TaskRow[] = [];
     for (const note of this.visibleNotes()) {
       if (note.encrypted) continue;
       for (const task of this.extract(note.id).tasks)
-        rows.push({ ...task, noteId: note.id, noteTitle: note.title });
+        rows.push({
+          ...task,
+          noteId: note.id,
+          noteTitle: note.title,
+          order: order.get(`${note.id}:${task.id}`),
+        });
     }
     return rows;
+  }
+  setTaskOrder(keys: string[]) {
+    const order = this.space.doc.getMap<number>('taskOrder');
+    this.space.doc.transact(() => keys.forEach((key, index) => order.set(key, index)));
+  }
+  /** Метки пространства (имена). */
+  tags(): string[] {
+    return [...this.space.doc.getMap<string>('tags').keys()].sort((a, b) => a.localeCompare(b, 'ru'));
+  }
+  addTag(name: string) {
+    const tag = name.trim().replace(/^#/, '');
+    if (tag) this.space.doc.getMap<string>('tags').set(tag, tag);
+    return tag;
+  }
+  setAppearance(theme: 'system' | 'light' | 'dark', accent: string) {
+    const prefs = this.space.doc.getMap<string>('prefs');
+    this.space.doc.transact(() => {
+      prefs.set('theme', theme);
+      prefs.set('accent', accent);
+    });
+  }
+  /** Корзина: свои заметки с deletedAt, свежие первыми. */
+  trash(): Note[] {
+    return [...this.metadata.values()]
+      .filter((n) => n.deletedAt && this.isOwner(n.id))
+      .sort((a, b) => String(b.deletedAt).localeCompare(String(a.deletedAt)));
+  }
+  /** Удалить навсегда (как deleteForever в вебе): надгробие в purged, чтобы другие устройства не вернули. */
+  deleteForever(ids: string[]) {
+    this.space.doc.transact(() => {
+      for (const id of ids)
+        if (this.metadata.get(id)?.deletedAt) {
+          this.space.doc.getMap('purged').set(id, true);
+          this.space.doc.getMap('notes').delete(id);
+        }
+    });
   }
   setTask(noteId: string, taskId: string, checked: boolean) {
     if (!this.canEdit(noteId)) return;
@@ -289,6 +361,12 @@ export class Workspace {
     if (this.isOwner(id)) this.patch(id, values, false);
   }
   setTitle(id: string, title: string) {
+    const meta = this.metadata.get(id);
+    if (meta?.encrypted && meta.hideTitle) {
+      this.secure.doc(id)?.getMap('secure').set('title', title);
+      this.patch(id, {}, true);
+      return;
+    }
     this.patch(id, { title }, true);
   }
   /** Свойства заметки: как Workspace.update в вебе (общие заметки — через карту collaboration). */
@@ -319,6 +397,43 @@ export class Workspace {
       if (touch) fields.set('updatedAt', now);
     });
   }
+  /** Метаданные заметки под паролем (как addEncryptedNote в вебе). */
+  private addEncrypted(
+    id: string,
+    meta: Pick<Note, 'title' | 'notebookId' | 'sectionId' | 'kind'> & { hideTitle: boolean },
+  ) {
+    const fields = new Y.Map<unknown>();
+    for (const [key, value] of Object.entries({
+      id,
+      title: meta.title,
+      notebookId: meta.notebookId,
+      sectionId: meta.sectionId,
+      tags: [],
+      pinned: false,
+      updatedAt: new Date().toISOString(),
+      deletedAt: null,
+      encrypted: true,
+      hideTitle: meta.hideTitle,
+      color: null,
+    } satisfies Note))
+      fields.set(key, value);
+    if (meta.kind) fields.set('kind', meta.kind);
+    this.space.doc.getMap<StoredNote>('notes').set(id, fields);
+  }
+  /** Название для показа и правки: у заметок со скрытым заголовком оно внутри шифра. */
+  noteTitle(id: string): string {
+    const meta = this.metadata.get(id);
+    if (meta?.encrypted && meta.hideTitle) {
+      const doc = this.secure.doc(id);
+      return doc ? secureTitle(doc) : '';
+    }
+    return meta?.title ?? '';
+  }
+  /** Документ содержимого: обычный или расшифрованный (если заметка под паролем открыта). */
+  contentDoc(id: string): Y.Doc | undefined {
+    return this.metadata.get(id)?.encrypted ? this.secure.doc(id) : this.notes.get(id)?.doc;
+  }
+
   /** Новая пустая заметка (как createNote в вебе). */
   addNote(notebookId: string | null, sectionId: string | null): string {
     const id = uuid();
@@ -397,12 +512,33 @@ export class Workspace {
   uploadImages() {
     if (this.stopped || this.connection !== 'online') return Promise.resolve();
     return this.images.upload(
-      [...this.notes].map(([id, entry]) => [id, entry.doc]),
+      [
+        ...[...this.notes].map(([id, entry]) => [id, entry.doc] as [string, Y.Doc]),
+        // картинки заметок под паролем грузятся без noteId (как в вебе)
+        ...this.secure.docs().map(([, doc]) => ['', doc] as [string, Y.Doc]),
+      ],
       (id) => {
+        if (!id) return true;
         const entry = this.notes.get(id);
         return !!entry && entry.provider.isSynced && this.canEdit(id);
       },
     );
+  }
+
+  /** Настройки этого устройства (не синхронизируются). */
+  local<T>(key: string) {
+    return this.store.get<T>(`local:${key}`);
+  }
+  async setLocal(key: string, value: unknown) {
+    await this.store.set(`local:${key}`, value);
+    for (const listener of this.localListeners.get(key) ?? []) listener();
+  }
+  private localListeners = new Map<string, Set<() => void>>();
+  onLocalChange(key: string, listener: () => void) {
+    let set = this.localListeners.get(key);
+    if (!set) this.localListeners.set(key, (set = new Set()));
+    set.add(listener);
+    return () => void set.delete(listener);
   }
 
   async refreshCollaboration() {
@@ -430,12 +566,19 @@ export class Workspace {
   async persist() {
     await this.store.flush().catch(() => undefined);
   }
+  /** Приложение ушло в фон: заметки под паролем закрываются (сохранив правки). */
+  lockSecure() {
+    this.vault.lock();
+    this.secure.lockAll();
+  }
 
   async destroy() {
     this.stopped = true;
     clearInterval(this.collaborationTimer);
     clearTimeout(this.cleanupTimer);
     clearTimeout(this.emitTimer);
+    this.vault.destroy();
+    this.secure.destroy();
     for (const entry of [this.space, ...this.notes.values()]) entry.provider.destroy();
     this.socket.destroy();
     await this.store.close();
