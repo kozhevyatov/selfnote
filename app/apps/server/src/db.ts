@@ -6,6 +6,7 @@ import path from 'node:path';
 import * as Y from 'yjs';
 import { extractDocument, deletedNoteIds, uniqueTasks, renderDocument } from '@selfnote/shared';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 export const dataDir = path.resolve(
   process.env.DATA_DIR || fileURLToPath(new URL('../../../../data/', import.meta.url)),
 );
@@ -169,6 +170,13 @@ export async function openDatabase(config: Config): Promise<DB> {
     db: conn,
     provider: {
       getMigrations: async () => ({
+        '011_dedupe_versions': {
+          // История копила версии без изменений (открытие заметки, закрытие вкладки).
+          // Оставляем только версии, содержимое которых отличается от предыдущей.
+          up: async (raw: Kysely<unknown>) => {
+            await dedupeVersions(raw as unknown as DB);
+          },
+        },
         '010_user_blocking': {
           up: async (d: Kysely<unknown>) => {
             await d.schema.alterTable('users').addColumn('blocked_at', 'varchar(30)').execute();
@@ -524,6 +532,11 @@ export async function openDatabase(config: Config): Promise<DB> {
     await conn.destroy();
     throw result.error;
   }
+  // После чистки истории возвращаем освободившееся место на диск (вне транзакции миграции).
+  if (
+    result.results?.some((r) => r.migrationName === '011_dedupe_versions' && r.status === 'Success')
+  )
+    await compactDatabase(conn, config.type);
   return conn;
 }
 export async function loadDatabase() {
@@ -596,5 +609,80 @@ export async function rebuildNoteAttachments(d: DB) {
           [...found].map((id) => ({ note_id: noteId, attachment_id: id, owner_id: note.owner_id })),
         )
         .execute();
+  }
+}
+
+/** Отпечаток содержимого версии: текст, разметка и задачи, без истории правок Yjs. */
+export function versionContentKey(state: Uint8Array): string | null {
+  const doc = new Y.Doc();
+  try {
+    Y.applyUpdate(doc, state);
+    return createHash('sha256').update(doc.getXmlFragment('content').toString()).digest('hex');
+  } catch {
+    return null;
+  } finally {
+    doc.destroy();
+  }
+}
+/** Совпадает ли содержимое с последней сохранённой версией заметки. */
+export async function sameAsLastVersion(
+  trx: Pick<DB, 'selectFrom'>,
+  noteId: string,
+  state: Uint8Array,
+): Promise<boolean> {
+  const last = await trx
+    .selectFrom('note_versions')
+    .select('state')
+    .where('note_id', '=', noteId)
+    .orderBy('created_at', 'desc')
+    .executeTakeFirst();
+  if (!last) return false;
+  const key = versionContentKey(state);
+  return key !== null && key === versionContentKey(last.state);
+}
+/** Удалить версии, повторяющие предыдущую. Версии с меткой (восстановление) не трогаем. */
+export async function dedupeVersions(d: DB): Promise<number> {
+  const notes = await d.selectFrom('note_versions').select('note_id').distinct().execute();
+  let removed = 0;
+  for (const { note_id } of notes) {
+    const rows = await d
+      .selectFrom('note_versions')
+      .select(['id', 'label'])
+      .where('note_id', '=', note_id)
+      .orderBy('created_at', 'asc')
+      .execute();
+    const drop: string[] = [];
+    let previous: string | null = null;
+    for (const row of rows) {
+      // Снапшоты читаем по одному, чтобы не держать в памяти всю историю заметки.
+      const version = await d
+        .selectFrom('note_versions')
+        .select('state')
+        .where('id', '=', row.id)
+        .executeTakeFirstOrThrow();
+      const key = versionContentKey(version.state);
+      if (key !== null && key === previous && !row.label) drop.push(row.id);
+      else previous = key;
+    }
+    for (let i = 0; i < drop.length; i += 500)
+      await d
+        .deleteFrom('note_versions')
+        .where('id', 'in', drop.slice(i, i + 500))
+        .execute();
+    removed += drop.length;
+  }
+  return removed;
+}
+/** Сжать файл базы после массового удаления. */
+export async function compactDatabase(d: DB, type: Config['type']) {
+  try {
+    if (type === 'sqlite') {
+      await sql`VACUUM`.execute(d);
+      await sql`PRAGMA wal_checkpoint(TRUNCATE)`.execute(d);
+    } else {
+      await sql`OPTIMIZE TABLE note_versions`.execute(d);
+    }
+  } catch (error) {
+    console.warn('Не удалось сжать базу:', error);
   }
 }

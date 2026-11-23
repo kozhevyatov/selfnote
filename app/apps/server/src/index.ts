@@ -39,6 +39,7 @@ import {
   activateDatabase,
   attachmentIds,
   type DB,
+  sameAsLastVersion,
 } from './db.js';
 import { shareAssets, sharePage, unavailablePage, SHARE_CSP } from './share-page.js';
 import {
@@ -1082,7 +1083,10 @@ async function storeDocument(name: string, document: Y.Doc, owner: string, autho
           .where('note_id', '=', noteId)
           .orderBy('created_at', 'desc')
           .executeTakeFirst();
-        if (!last || Date.now() - Date.parse(last.created_at) >= 300000) {
+        if (
+          (!last || Date.now() - Date.parse(last.created_at) >= 300000) &&
+          !(await sameAsLastVersion(trx, noteId, state))
+        ) {
           await trx
             .insertInto('note_versions')
             .values({ id: randomUUID(), note_id: noteId, author, state, created_at: now })
@@ -1442,6 +1446,8 @@ app.post('/api/notes/:id/versions', { bodyLimit: 24 * 1024 * 1024 }, async (requ
       doc.destroy();
     }
     await indexAttachments(database(), id, row.owner_id, images);
+    // Содержимое не изменилось с прошлой версии — новую не создаём.
+    if (await sameAsLastVersion(database(), id, bytes)) return { ok: true, skipped: true };
     await database()
       .insertInto('note_versions')
       .values({

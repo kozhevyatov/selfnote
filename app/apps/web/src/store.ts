@@ -169,8 +169,9 @@ export class Workspace {
     window.addEventListener('online', this.reconnect);
     window.addEventListener('pagehide', this.onHide);
   }
+  /** Отметки о правках уже лежат в localStorage — при закрытии вкладки только пробуем отправить. */
   private onHide = () => {
-    for (const id of this.notes.keys()) this.markVersion(id);
+    void this.flushVersions();
   };
   private reconnect = () => {
     void refresh()
@@ -403,7 +404,9 @@ export class Workspace {
       entry.doc.on('update', (_update: Uint8Array, origin: unknown) => {
         this.notesCache = null;
         this.extracted.delete(id);
-        if (origin !== entry!.local) this.markVersion(id);
+        // Версию создают только правки на этом устройстве: данные из локального кэша
+        // и с сервера (открытие заметки, правки с других устройств) — не изменения.
+        if (origin !== entry!.local && origin !== entry!.provider) this.markVersion(id);
         this.emit();
       });
       entry.ready.then(() => this.emit());
@@ -663,10 +666,6 @@ export class Workspace {
     await this.flushVersions();
   }
   private async saveVersions() {
-    for (const id of this.notes.keys()) {
-      const note = this.metadata.get(id);
-      if (note && Date.now() - Date.parse(note.updatedAt) < 310000) this.markVersion(id);
-    }
     await this.flushVersions();
   }
   private flushing = false;
