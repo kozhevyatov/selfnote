@@ -8,7 +8,6 @@ import { uuid } from './ids';
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
   FileText,
-  Feather,
   KeyRound,
   Plus,
   Search,
@@ -35,6 +34,7 @@ import {
   Share2,
   FolderInput,
 } from 'lucide-react';
+import { Logo } from './Logo';
 import MiniSearch from 'minisearch';
 import {
   localDate,
@@ -621,7 +621,7 @@ function WorkspaceShell({
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-icon">
-            <Feather size={19} />
+            <Logo size={19} />
           </span>
           <strong>SelfNote</strong>
           <button

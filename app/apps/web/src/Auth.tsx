@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Feather, ArrowRight, Database, ShieldCheck, RotateCcw } from 'lucide-react';
+import { ArrowRight, Database, ShieldCheck, RotateCcw } from 'lucide-react';
+import { Logo } from './Logo';
 import { api, setToken, type User } from './api';
 export function Auth({
   setup,
@@ -36,7 +37,7 @@ export function Auth({
     <div className="auth-screen">
       <div className="auth-brand">
         <span className="brand-icon">
-          <Feather size={22} />
+          <Logo size={22} />
         </span>{' '}
         SelfNote
       </div>
@@ -99,7 +100,7 @@ export function Auth({
         }}
       >
         <span className="welcome-icon">
-          {setup ? <Database size={28} /> : <Feather size={28} />}
+          {setup ? <Database size={28} /> : <Logo size={28} />}
         </span>
         <h1>
           {setup

@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as Y from 'yjs';
 import { HocuspocusProvider, WebSocketStatus } from '@hocuspocus/provider';
-import { Feather, KeyRound, LogOut, Users } from 'lucide-react';
+import { KeyRound, LogOut, Users } from 'lucide-react';
+import { Logo } from './Logo';
 import { GuestEditor } from './Editor';
 
 /**
@@ -90,7 +91,7 @@ export default function GuestApp({ token }: { token: string }) {
       <div className="auth-screen">
         <div className="auth-card">
           <span className="welcome-icon">
-            <Feather size={28} />
+            <Logo size={28} />
           </span>
           <h1>Заметка недоступна</h1>
           <p>{fatal}</p>
@@ -327,7 +328,7 @@ function GuestNote({
     <div className="guest-shell">
       <header className="guest-header">
         <span className="guest-brand">
-          <Feather size={20} />
+          <Logo size={20} />
           SelfNote
         </span>
         <span className="small muted">
