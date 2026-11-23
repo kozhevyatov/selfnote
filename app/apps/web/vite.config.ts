@@ -1,38 +1,42 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   plugins: [
     react(),
-    VitePWA({
-      registerType: 'prompt',
-      manifest: {
-        name: 'SelfNote — заметки и задачи',
-        short_name: 'SelfNote',
-        lang: 'ru',
-        theme_color: '#ECEBE7',
-        background_color: '#ECEBE7',
-        display: 'standalone',
-        icons: [
-          { src: '/icon-192.png', sizes: '192x192', type: 'image/png' },
-          { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
-          // maskable — во весь квадрат: форму (круг, «сквиркл») вырезает система
-          {
-            src: '/icon-maskable-512.png',
-            sizes: '512x512',
-            type: 'image/png',
-            purpose: 'maskable',
-          },
-          { src: '/icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' },
-        ],
-      },
-      workbox: {
-        globPatterns: ['**/*.{js,css,html,woff2,svg,png}'],
-        navigateFallbackDenylist: [/^\/api\//, /^\/collab/, /^\/s\//],
-      },
-    }),
+    // десктоп-приложению (Tauri) service worker не нужен: файлы и так внутри приложения
+    mode !== 'desktop' &&
+      VitePWA({
+        registerType: 'prompt',
+        manifest: {
+          name: 'SelfNote — заметки и задачи',
+          short_name: 'SelfNote',
+          lang: 'ru',
+          theme_color: '#ECEBE7',
+          background_color: '#ECEBE7',
+          display: 'standalone',
+          icons: [
+            { src: '/icon-192.png', sizes: '192x192', type: 'image/png' },
+            { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+            // maskable — во весь квадрат: форму (круг, «сквиркл») вырезает система
+            {
+              src: '/icon-maskable-512.png',
+              sizes: '512x512',
+              type: 'image/png',
+              purpose: 'maskable',
+            },
+            { src: '/icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' },
+          ],
+        },
+        workbox: {
+          globPatterns: ['**/*.{js,css,html,woff2,svg,png}'],
+          navigateFallbackDenylist: [/^\/api\//, /^\/collab/, /^\/s\//],
+        },
+      }),
   ],
   build: {
+    // десктоп: только основной интерфейс, отдельная папка
+    ...(mode === 'desktop' && { outDir: 'dist-desktop' }),
     // манифест нужен серверу, чтобы подключить скрипт публичной страницы /s/<token>
     manifest: true,
     rollupOptions: {
@@ -65,4 +69,4 @@ export default defineConfig({
       '/s/': { target: 'http://127.0.0.1:1339' },
     },
   },
-});
+}));

@@ -3163,3 +3163,23 @@ mark[class^='highlight-'] {
 .toolbar .icon-button.swatch-highlight.highlight-gray:not(.active) {
   background: var(--hl-gray);
 }
+
+/* Десктоп-приложение: строка «Сервер: … · сменить» на экране входа */
+.auth-card > p.auth-server {
+  margin: -12px 0 22px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.link-button {
+  display: inline;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-text);
+  font: inherit;
+  cursor: pointer;
+}
+.link-button:hover {
+  text-decoration: underline;
+}

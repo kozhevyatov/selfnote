@@ -122,9 +122,31 @@ async function userId(request: import('fastify').FastifyRequest): Promise<string
   if (!session) throw Object.assign(new Error('Сессия завершена'), { statusCode: 401 });
   return claims.sub;
 }
+/**
+ * Десктоп-приложение (Tauri) грузит интерфейс из себя и обращается к API с другого
+ * источника. Cookie оно не использует (refresh-токен в теле, см. isAppClient), поэтому
+ * CORS открыт только для этих источников и без Allow-Credentials.
+ */
+const DESKTOP_ORIGINS = new Set([
+  'tauri://localhost',
+  'http://tauri.localhost',
+  'https://tauri.localhost',
+]);
 app.addHook('onRequest', async (request, reply) => {
-  if (['POST', 'PATCH', 'PUT', 'DELETE'].includes(request.method) && request.headers.origin) {
-    const origin = new URL(request.headers.origin);
+  const requestOrigin = request.headers.origin;
+  if (requestOrigin && DESKTOP_ORIGINS.has(requestOrigin)) {
+    reply.header('Access-Control-Allow-Origin', requestOrigin).header('Vary', 'Origin');
+    if (request.method === 'OPTIONS')
+      return reply
+        .code(204)
+        .header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE')
+        .header('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-SelfNote-Client')
+        .header('Access-Control-Max-Age', '86400')
+        .send();
+    return;
+  }
+  if (['POST', 'PATCH', 'PUT', 'DELETE'].includes(request.method) && requestOrigin) {
+    const origin = new URL(requestOrigin);
     if (origin.host !== request.headers.host && origin.origin !== process.env.APP_ORIGIN)
       return reply.code(403).send({ message: 'Недопустимый источник запроса' });
   }

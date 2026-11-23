@@ -9,6 +9,7 @@ import {
   type ImportPlan,
   type ImportReport,
 } from './transfer/importers';
+import { apiUrl } from './platform';
 
 const KIND: Record<ImportPlan['kind'], string> = {
   nsx: 'Synology Note Station',
@@ -343,7 +344,7 @@ export function Backups({ toast }: { toast: (message: string) => void }) {
                     disabled={Boolean(busy)}
                     onClick={() =>
                       run('Скачиваем…', async () => {
-                        const response = await fetch(`/api/admin/backups/${b.name}`, {
+                        const response = await fetch(apiUrl(`/api/admin/backups/${b.name}`), {
                           headers: { Authorization: `Bearer ${await token()}` },
                         });
                         if (!response.ok) throw new Error('Не удалось скачать копию');

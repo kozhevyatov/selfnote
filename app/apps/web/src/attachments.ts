@@ -2,6 +2,7 @@ import { uuid } from './ids';
 import * as Y from 'yjs';
 import { api, token } from './api';
 import type { Workspace } from './store';
+import { apiUrl } from './platform';
 interface StoredImage {
   key: string;
   blob: Blob;
@@ -49,7 +50,9 @@ export async function imageBlob(src: string, userId: string): Promise<Blob> {
     cached = await get(key);
   if (cached) return cached.blob;
   if (!src.startsWith('/api/attachments/')) throw new Error('Изображение ещё не синхронизировано');
-  const response = await fetch(src, { headers: { Authorization: `Bearer ${await token()}` } });
+  const response = await fetch(apiUrl(src), {
+    headers: { Authorization: `Bearer ${await token()}` },
+  });
   if (!response.ok) throw new Error('Изображение недоступно');
   const blob = await response.blob();
   await put({ key, blob, pending: false });

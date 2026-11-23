@@ -16,14 +16,9 @@ import { api, refresh, token } from './api';
 import { uuid } from './ids';
 import { SecureNotes, secureTitle } from './secure';
 import type { Theme } from './theme';
+import { socketUrl } from './platform';
 /** Разделы страницы настроек. */
-export type SettingsSection =
-  | 'profile'
-  | 'appearance'
-  | 'notebooks'
-  | 'data'
-  | 'backups'
-  | 'users';
+export type SettingsSection = 'profile' | 'appearance' | 'notebooks' | 'data' | 'backups' | 'users';
 export const useUI = create<{
   selected: string | null;
   filter: string;
@@ -151,7 +146,7 @@ export class Workspace {
     this.collaborationTimer = setInterval(() => void this.refreshCollaboration(), 10000);
     this.secure = new SecureNotes(this);
     this.socket = new HocuspocusProviderWebsocket({
-      url: `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/collab`,
+      url: socketUrl(),
     });
     this.space = this.create(`space:${userId}`);
     this.vault = new PasswordVault(this);

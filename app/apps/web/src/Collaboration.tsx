@@ -3,6 +3,7 @@ import { Copy, KeyRound, Link2, RotateCcw, Trash2, Unlock, Users, X } from 'luci
 import { api } from './api';
 import { copyInvite, copyText, InviteLinkField, type InviteRow } from './Invites';
 import type { Workspace } from './store';
+import { publicOrigin } from './platform';
 
 interface Member {
   id: string;
@@ -329,7 +330,7 @@ interface GuestLink {
   expired: boolean;
   devices: { id: string; name: string; last_seen_at: string }[];
 }
-export const guestLink = (token: string) => `${location.origin}/g/${token}`;
+export const guestLink = (token: string) => `${publicOrigin()}/g/${token}`;
 function randomPin() {
   const values = crypto.getRandomValues(new Uint32Array(6));
   return Array.from(values, (v) => String(v % 10)).join('');

@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { ArrowRight, Database, ShieldCheck, RotateCcw } from 'lucide-react';
 import { Logo } from './Logo';
 import { api, setToken, type User } from './api';
+import { isDesktop, serverOrigin } from './platform';
+import { changeServer } from './ServerSetup';
 export function Auth({
   setup,
   registration,
@@ -99,9 +101,7 @@ export function Auth({
           }
         }}
       >
-        <span className="welcome-icon">
-          {setup ? <Database size={28} /> : <Logo size={28} />}
-        </span>
+        <span className="welcome-icon">{setup ? <Database size={28} /> : <Logo size={28} />}</span>
         <h1>
           {setup
             ? restore
@@ -122,6 +122,14 @@ export function Auth({
                 }. Создайте аккаунт, чтобы продолжить.`
               : 'Заметки, планы и маленькие большие идеи — в одном месте.'}
         </p>
+        {isDesktop && !setup && (
+          <p className="auth-server">
+            Сервер: {serverOrigin().replace(/^https?:\/\//, '')} ·{' '}
+            <button type="button" className="link-button" onClick={changeServer}>
+              сменить
+            </button>
+          </p>
+        )}
         {setup && restore && (
           <label>
             Файл резервной копии (.zip)

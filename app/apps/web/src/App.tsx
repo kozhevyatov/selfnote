@@ -50,6 +50,8 @@ import { applyAppearance, storedAppearance, type Theme } from './theme';
 import { PasswordDialog, type PasswordMode } from './NoteSecurity';
 import { ShareDialog } from './Share';
 import { api, refresh, setToken, type User } from './api';
+import { isDesktop } from './platform';
+import { changeServer } from './ServerSetup';
 import { Auth } from './Auth';
 import { SettingsNav, SettingsPane, initials } from './Settings';
 import { Workspace, useUI } from './store';
@@ -65,7 +67,10 @@ const monthFormat = new Intl.DateTimeFormat('ru', { month: 'long' });
 const PREVIEW_CHARS = 70;
 function preview(text: string) {
   // пробелы и переносы схлопываем до обрезки, чтобы пустые строки не съедали лимит
-  const flat = text.slice(0, PREVIEW_CHARS * 4).replace(/\s+/g, ' ').trim();
+  const flat = text
+    .slice(0, PREVIEW_CHARS * 4)
+    .replace(/\s+/g, ' ')
+    .trim();
   return flat.length > PREVIEW_CHARS ? `${flat.slice(0, PREVIEW_CHARS).trimEnd()}…` : flat;
 }
 const NOTE_TYPE = 'application/x-selfnote-note';
@@ -126,6 +131,7 @@ export default function App() {
       <div className="loading">
         <p>{error}</p>
         <button onClick={() => location.reload()}>Попробовать снова</button>
+        {isDesktop && <button onClick={changeServer}>Сменить сервер</button>}
       </div>
     );
   if (!user)
@@ -236,8 +242,20 @@ function WorkspaceShell({
         closeMenus();
       }
     };
+    // пункты меню десктоп-приложения (горячие клавиши перехватывает меню macOS)
+    const menu = (e: Event) => {
+      const action = (e as CustomEvent<string>).detail;
+      if (action === 'new-note') workspace.createNote();
+      if (action === 'new-list') workspace.createNote(true);
+      if (action === 'search') searchRef.current?.focus();
+      if (action === 'settings') ui.openSettings('profile');
+    };
     window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
+    window.addEventListener('selfnote:menu', menu);
+    return () => {
+      window.removeEventListener('keydown', handler);
+      window.removeEventListener('selfnote:menu', menu);
+    };
   }, [workspace]);
   // Выпадающие меню закрываются кликом мимо них и после выбора пункта.
   useEffect(() => {
@@ -499,8 +517,7 @@ function WorkspaceShell({
   }
   function removeNotebook(book: Notebook, stay = false) {
     const inside =
-      ui.filter === book.id ||
-      sections.some((s) => s.notebookId === book.id && s.id === ui.filter);
+      ui.filter === book.id || sections.some((s) => s.notebookId === book.id && s.id === ui.filter);
     setDialog({
       title: `Удалить «${book.name}»?`,
       label: 'Заметки останутся в разделе «Все заметки».',
@@ -905,9 +922,7 @@ function WorkspaceShell({
                         )}
                         {workspace.title(note)}
                       </strong>
-                      <time>
-                        {timeFormat.format(new Date(note.updatedAt))}
-                      </time>
+                      <time>{timeFormat.format(new Date(note.updatedAt))}</time>
                     </span>
                     <span className="note-preview">
                       <Preview
@@ -1803,11 +1818,7 @@ function Preview({
     return (
       <>{parts.map((part, i) => (part.mark ? <mark key={i}>{part.text}</mark> : part.text))}</>
     );
-  return (
-    <>
-      {preview(text) || (workspace.isLoaded(note.id) ? 'Пока здесь чистый лист' : '…')}
-    </>
-  );
+  return <>{preview(text) || (workspace.isLoaded(note.id) ? 'Пока здесь чистый лист' : '…')}</>;
 }
 function EditDialog({ dialog, close }: { dialog: Dialog; close: () => void }) {
   const [value, setValue] = useState(dialog.value);
@@ -1877,7 +1888,9 @@ function EditDialog({ dialog, close }: { dialog: Dialog; close: () => void }) {
             <ColorPicker value={color} onChange={setColor} label="Выбрать другой цвет" />
           </div>
         )}
-        {dialog.icon !== undefined && !parent && <NotebookIconPicker value={icon} onChange={setIcon} />}
+        {dialog.icon !== undefined && !parent && (
+          <NotebookIconPicker value={icon} onChange={setIcon} />
+        )}
         <div className="actions">
           <button type="button" onClick={close}>
             Отмена

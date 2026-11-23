@@ -5,6 +5,7 @@ export interface User {
   /** admin — может управлять резервными копиями. */
   role?: string;
 }
+import { apiUrl, isDesktop, refreshToken, setRefreshToken } from './platform';
 let accessToken = '';
 let refreshing: Promise<{ accessToken: string; user: User }> | undefined;
 export function setToken(token: string) {
@@ -12,8 +13,20 @@ export function setToken(token: string) {
 }
 export async function refresh() {
   if (!refreshing)
-    refreshing = fetch('/api/auth/refresh', { method: 'POST', credentials: 'same-origin' })
+    refreshing = (
+      isDesktop
+        ? refreshToken()
+          ? fetch(apiUrl('/api/auth/refresh'), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'X-SelfNote-Client': 'app' },
+              body: JSON.stringify({ refreshToken: refreshToken() }),
+              credentials: 'omit',
+            })
+          : Promise.resolve(new Response(null, { status: 401 }))
+        : fetch('/api/auth/refresh', { method: 'POST', credentials: 'same-origin' })
+    )
       .then(async (r) => {
+        if (isDesktop && r.status === 401) setRefreshToken(null);
         if (!r.ok) throw new Error('Войдите в аккаунт');
         const data = await r.json();
         setToken(data.accessToken);
@@ -33,7 +46,19 @@ export async function api<T>(url: string, options: RequestInit = {}, retry = tru
   if (options.body != null && !(options.body instanceof FormData))
     headers.set('Content-Type', 'application/json');
   if (accessToken) headers.set('Authorization', `Bearer ${accessToken}`);
-  const response = await fetch(url, { ...options, headers, credentials: 'same-origin' });
+  if (isDesktop) {
+    headers.set('X-SelfNote-Client', 'app');
+    if (url === '/api/auth/logout' && refreshToken()) {
+      headers.set('Content-Type', 'application/json');
+      options = { ...options, body: JSON.stringify({ refreshToken: refreshToken() }) };
+      setRefreshToken(null);
+    }
+  }
+  const response = await fetch(apiUrl(url), {
+    ...options,
+    headers,
+    credentials: isDesktop ? 'omit' : 'same-origin',
+  });
   if (
     response.status === 401 &&
     retry &&
@@ -50,5 +75,11 @@ export async function api<T>(url: string, options: RequestInit = {}, retry = tru
       data: error,
     });
   }
-  return response.json();
+  const data = await response.json();
+  // вход, регистрация, мастер: в приложении сервер отдаёт refresh-токен в теле
+  if (isDesktop && data && typeof data.refreshToken === 'string') {
+    setRefreshToken(data.refreshToken);
+    delete data.refreshToken;
+  }
+  return data as T;
 }

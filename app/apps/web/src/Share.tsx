@@ -5,6 +5,7 @@ import { api } from './api';
 import { copyText } from './Invites';
 import { Switch } from './Switch';
 import { useUI, type Workspace } from './store';
+import { publicOrigin } from './platform';
 
 interface ShareRow {
   id: string;
@@ -22,7 +23,7 @@ const EXPIRY = [
   { label: '7 дней', days: 7 },
   { label: '30 дней', days: 30 },
 ];
-const linkOf = (row: ShareRow) => `${location.origin}/s/${row.token}`;
+const linkOf = (row: ShareRow) => `${publicOrigin()}/s/${row.token}`;
 const date = (value: string) =>
   new Date(value).toLocaleString('ru', {
     day: 'numeric',
@@ -57,7 +58,9 @@ export function ShareDialog({
   }, [note.id]);
   async function copy(url: string) {
     toast(
-      (await copyText(url)) ? 'Ссылка скопирована' : 'Не удалось скопировать — выделите ссылку вручную',
+      (await copyText(url))
+        ? 'Ссылка скопирована'
+        : 'Не удалось скопировать — выделите ссылку вручную',
     );
   }
   async function create() {

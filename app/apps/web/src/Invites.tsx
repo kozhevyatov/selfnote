@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Copy, Link2, Trash2 } from 'lucide-react';
 import { api } from './api';
+import { publicOrigin } from './platform';
 
 export interface InviteRow {
   id: string;
@@ -12,7 +13,7 @@ export interface InviteRow {
   created_at?: string;
   created_by_name?: string;
 }
-export const inviteLink = (token: string) => `${location.origin}/?invite=${token}`;
+export const inviteLink = (token: string) => `${publicOrigin()}/?invite=${token}`;
 
 /**
  * Копирование в буфер обмена с запасным путём: navigator.clipboard есть только

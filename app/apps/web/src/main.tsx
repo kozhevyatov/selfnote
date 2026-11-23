@@ -7,9 +7,14 @@ import App from './App';
 import GuestApp from './Guest';
 import './styles.css';
 import { initAppearance } from './theme';
+import { isDesktop, openExternalLinks, serverOrigin } from './platform';
+import { ServerSetup } from './ServerSetup';
 initAppearance();
+openExternalLinks();
 // /g/<токен> — гостевая страница совместной заметки, без аккаунта и рабочего пространства
 const guest = /^\/g\/([A-Za-z0-9_-]{32})\/?$/.exec(location.pathname);
+// десктоп-приложение: сначала выбрать сервер
+const needServer = isDesktop && !serverOrigin();
 createRoot(document.getElementById('root')!).render(
-  guest ? <GuestApp token={guest[1]} /> : <App />,
+  needServer ? <ServerSetup /> : guest ? <GuestApp token={guest[1]} /> : <App />,
 );
