@@ -1,0 +1,15 @@
+{
+  "name": "selfnote-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "web": "cd ../app && npm run build -w @selfnote/shared && npm run build:desktop -w @selfnote/web",
+    "icons": "tauri icon app-icon.png",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "build:universal": "tauri build --target universal-apple-darwin"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.9.0"
+  }
+}

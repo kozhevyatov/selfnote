@@ -1,0 +1,44 @@
+name: Десктоп-приложение
+
+# Сборка .dmg для macOS: вручную или по тегу вида desktop-v0.1.0.
+on:
+  workflow_dispatch:
+  push:
+    tags: ['desktop-v*']
+
+jobs:
+  macos:
+    name: macOS (Apple Silicon + Intel)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            app/package-lock.json
+            desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - run: npm ci --no-audit --no-fund
+        working-directory: app
+      - run: npm install --no-audit --no-fund
+        working-directory: desktop
+      - run: npm run icons
+        working-directory: desktop
+      - run: npm run build:universal
+        working-directory: desktop
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SelfNote-macOS
+          path: desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
