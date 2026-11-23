@@ -93,6 +93,26 @@ export class LocalStore {
     );
   }
 
+  /** Все значения с ключами, начинающимися с prefix. */
+  async entries<T>(prefix: string): Promise<[string, T][]> {
+    const rows = await this.db.getAllAsync<{ key: string; value: string }>(
+      'SELECT key, value FROM kv WHERE substr(key, 1, ?) = ?',
+      [prefix.length, prefix],
+    );
+    const result: [string, T][] = [];
+    for (const row of rows)
+      try {
+        result.push([row.key, JSON.parse(row.value) as T]);
+      } catch {
+        /* битая запись — пропускаем */
+      }
+    return result;
+  }
+  async delete(key: string) {
+    if (this.closed) return;
+    await this.db.runAsync('DELETE FROM kv WHERE key = ?', [key]);
+  }
+
   async close() {
     await this.flush();
     this.closed = true;

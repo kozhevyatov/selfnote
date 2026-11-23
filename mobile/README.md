@@ -27,7 +27,7 @@ npx expo start
 y-prosemirror молча выбросит незнакомые узлы. Собирается в одну HTML-строку:
 
 ```bash
-npx expo install react-native-webview   # один раз
+npx expo install react-native-webview expo-image-picker expo-file-system   # один раз
 npm run editor                          # = npm run build:mobile-editor -w @selfnote/web
 ```
 

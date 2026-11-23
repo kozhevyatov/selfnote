@@ -20,6 +20,7 @@ export default function Notes() {
   const [sectionId, setSectionId] = useState<string | null>(params.section ?? null);
   const [query, setQuery] = useState('');
   const [refreshing, setRefreshing] = useState(false);
+  const [menu, setMenu] = useState<string | null>(null);
 
   useEffect(() => {
     setNotebookId(params.notebook ?? null);
@@ -230,7 +231,7 @@ export default function Notes() {
               <SectionTitle title="Закреплённые" icon={<Pin color={c.secondary} size={14} />} />
               <Card>
                 {pinned.map((note, i) => (
-                  <NoteRow key={note.id} note={note} workspace={workspace} first={i === 0} onPress={() => open(note.id)} />
+                  <NoteRow key={note.id} note={note} workspace={workspace} first={i === 0} onPress={() => open(note.id)} onLongPress={() => setMenu(note.id)} />
                 ))}
               </Card>
             </View>
@@ -243,7 +244,7 @@ export default function Notes() {
             terms.length ? (
               <Card key={group.key}>
                 {group.items.map((note, i) => (
-                  <NoteRow key={note.id} note={note} workspace={workspace} first={i === 0} onPress={() => open(note.id)} />
+                  <NoteRow key={note.id} note={note} workspace={workspace} first={i === 0} onPress={() => open(note.id)} onLongPress={() => setMenu(note.id)} />
                 ))}
               </Card>
             ) : (
@@ -251,7 +252,7 @@ export default function Notes() {
                 <SectionTitle title={group.title} hint={group.hint} />
                 <Card>
                   {group.items.map((note, i) => (
-                    <NoteRow key={note.id} note={note} workspace={workspace} first={i === 0} onPress={() => open(note.id)} />
+                    <NoteRow key={note.id} note={note} workspace={workspace} first={i === 0} onPress={() => open(note.id)} onLongPress={() => setMenu(note.id)} />
                   ))}
                 </Card>
               </View>

@@ -18,7 +18,7 @@ export type EditorCommand =
   | 'focusEnd';
 
 /** Какие кнопки панели сейчас «нажаты». */
-export type EditorActive = Partial<Record<EditorCommand | 'link', boolean>>;
+export type EditorActive = Partial<Record<EditorCommand | 'link' | 'image', boolean>>;
 
 export interface EditorTheme {
   dark: boolean;
@@ -43,6 +43,8 @@ export type ToEditor =
   | { type: 'theme'; theme: EditorTheme }
   | { type: 'command'; command: EditorCommand }
   | { type: 'link'; href: string | null }
+  /** Вставить картинку (src — local-image:… или /api/attachments/…) в место курсора. */
+  | { type: 'insertImage'; src: string }
   | { type: 'image'; src: string; data: string | null; error?: string };
 
 /** Редактор → приложение. */

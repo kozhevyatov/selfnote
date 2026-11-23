@@ -149,23 +149,42 @@ function requestImage(src: string, done: (data: string | null, error?: string) =
 const MobileImage = Image.extend({
   addNodeView() {
     return ({ node }) => {
+      let current = node;
       const wrap = document.createElement('div');
       wrap.className = 'note-image';
       wrap.contentEditable = 'false';
       const note = document.createElement('span');
       note.textContent = 'Загрузка изображения…';
       wrap.append(note);
-      const src = String(node.attrs.src ?? '');
-      if (src.startsWith('local-image:')) note.textContent = 'Картинка ещё не синхронизирована';
-      else
+      let shown = '';
+      // Картинку с телефона приложение отдаёт с диска сразу; при смене src (local-image → адрес
+      // на сервере после загрузки) старая картинка остаётся на месте, пока не готова новая.
+      const show = (src: string) => {
         requestImage(src, (data, error) => {
-          if (!data) return void (note.textContent = error || 'Изображение недоступно');
+          if (String(current.attrs.src ?? '') !== src) return;
+          if (!data) {
+            if (!shown) note.textContent = error || 'Изображение недоступно';
+            return;
+          }
+          if (data === shown) return;
           const img = document.createElement('img');
           img.src = data;
-          img.alt = String(node.attrs.alt || 'Изображение в заметке');
+          img.alt = String(current.attrs.alt || 'Изображение в заметке');
           wrap.replaceChildren(img);
+          shown = data;
         });
-      return { dom: wrap };
+      };
+      show(String(node.attrs.src ?? ''));
+      return {
+        dom: wrap,
+        update(next) {
+          if (next.type !== current.type) return false;
+          const changed = next.attrs.src !== current.attrs.src;
+          current = next;
+          if (changed) show(String(next.attrs.src ?? ''));
+          return true;
+        },
+      };
     };
   },
 });
@@ -363,6 +382,9 @@ window.__selfnote = (message: ToEditor) => {
       if (message.href)
         editor.chain().focus().extendMarkRange('link').setLink({ href: message.href }).run();
       else editor.chain().focus().extendMarkRange('link').unsetLink().run();
+      break;
+    case 'insertImage':
+      editor?.chain().focus().setImage({ src: message.src }).createParagraphNear().run();
       break;
     case 'image': {
       if (message.data) images.set(message.src, message.data);

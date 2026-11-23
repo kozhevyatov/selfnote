@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { ChevronLeft, Lock, Users } from 'lucide-react-native';
+import { ChevronLeft, Ellipsis, Lock, Users } from 'lucide-react-native';
+import { NoteMenu } from '../../../src/NoteMenu';
 import { useWorkspace } from '../../../src/session';
 import { changedLabel } from '../../../src/dates';
 import { NoteEditor, editorAvailable } from '../../../src/editor/NoteEditor';
@@ -18,6 +19,7 @@ export default function NoteScreen() {
   const { id, created } = useLocalSearchParams<{ id: string; created?: string }>();
   const note = workspace.metadata.get(id);
   const [ready, setReady] = useState(workspace.isLoaded(id));
+  const [menu, setMenu] = useState(false);
   const openable = !!note && !note.encrypted;
 
   useEffect(() => {
@@ -62,8 +64,20 @@ export default function NoteScreen() {
             </View>
           ) : null}
         </View>
+        {note && workspace.isOwner(id) ? (
+          <Pressable
+            onPress={() => setMenu(true)}
+            hitSlop={6}
+            style={styles.more}
+            accessibilityRole="button"
+            accessibilityLabel="Меню заметки"
+          >
+            <Ellipsis color={c.text} size={24} />
+          </Pressable>
+        ) : null}
       </View>
       <OfflineBanner workspace={workspace} />
+      <NoteMenu id={menu ? id : null} onClose={() => setMenu(false)} onTrashed={back} />
       {!note ? (
         <Text style={[styles.missing, { color: c.secondary }]}>Заметка удалена или доступ к ней закрыт.</Text>
       ) : note.encrypted ? (
@@ -101,6 +115,7 @@ const styles = StyleSheet.create({
   bar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, paddingBottom: 4, gap: 8 },
   back: { flexDirection: 'row', alignItems: 'center', height: 44, paddingRight: 6 },
   backText: { fontFamily: fonts.medium, fontSize: 17 },
+  more: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
   meta: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 10, paddingRight: 8 },
   place: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 11, paddingVertical: 5, borderRadius: 999, flexShrink: 1 },
   swatch: { width: 9, height: 9, borderRadius: 3 },

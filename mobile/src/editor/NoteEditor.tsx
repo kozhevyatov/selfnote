@@ -4,7 +4,8 @@
  * в обе стороны, сеть и офлайн-хранилище остаются на стороне приложения.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Keyboard, Linking, Platform, StyleSheet, View } from 'react-native';
+import { ActionSheetIOS, Alert, Keyboard, Linking, Platform, StyleSheet, View } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
 import { WebView, type WebViewMessageEvent, type WebViewProps } from 'react-native-webview';
 import * as Y from 'yjs';
 import {
@@ -23,6 +24,15 @@ import { LinkDialog } from './LinkDialog';
 import { Toolbar } from './Toolbar';
 
 const FROM_EDITOR = Symbol('editor');
+
+/** Тип файла по фактическому расширению: mimeType из галереи бывает от исходника (HEIC). */
+function mimeOf(asset: { uri: string; mimeType?: string | null }) {
+  const ext = asset.uri.split('?')[0].split('.').pop()?.toLowerCase();
+  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+  if (ext === 'png') return 'image/png';
+  if (ext === 'heic' || ext === 'heif') return 'image/heic';
+  return asset.mimeType ?? 'image/jpeg';
+}
 
 /** Типы WebView 14 с TypeScript 6 сводят пропсы к never (P = undefined) — описываем сами. */
 type WebViewHandle = { injectJavaScript(script: string): void; reload(): void };
@@ -167,6 +177,60 @@ export function NoteEditor({
   };
 
   const command = (name: EditorCommand) => send({ type: 'command', command: name });
+
+  /** Камера или галерея → файл на телефоне → картинка в месте курсора. */
+  async function pick(source: 'camera' | 'library') {
+    try {
+      const options: ImagePicker.ImagePickerOptions = {
+        mediaTypes: ['images'],
+        quality: 0.85,
+        exif: false,
+        // HEIC с iPhone сервер (sharp) не читает — просим у iOS совместимый JPEG
+        preferredAssetRepresentationMode:
+          ImagePicker.UIImagePickerPreferredAssetRepresentationMode.Compatible,
+      };
+      let result: ImagePicker.ImagePickerResult;
+      if (source === 'camera') {
+        const permission = await ImagePicker.requestCameraPermissionsAsync();
+        if (!permission.granted) {
+          Alert.alert('Нет доступа к камере', 'Разрешите доступ в настройках iOS: SelfNote → Камера.');
+          return;
+        }
+        result = await ImagePicker.launchCameraAsync(options);
+      } else
+        result = await ImagePicker.launchImageLibraryAsync({
+          ...options,
+          allowsMultipleSelection: true,
+          selectionLimit: 10,
+          orderedSelection: true,
+        });
+      if (result.canceled) return;
+      for (const asset of result.assets) {
+        const src = await workspace.addImage(asset.uri, mimeOf(asset));
+        send({ type: 'insertImage', src });
+      }
+    } catch (error) {
+      Alert.alert('Не удалось добавить картинку', (error as Error).message);
+    }
+  }
+  function chooseImage() {
+    const camera = 'Сделать фото';
+    const library = 'Выбрать из галереи';
+    if (Platform.OS === 'ios')
+      ActionSheetIOS.showActionSheetWithOptions(
+        { options: [camera, library, 'Отмена'], cancelButtonIndex: 2 },
+        (index) => {
+          if (index === 0) void pick('camera');
+          if (index === 1) void pick('library');
+        },
+      );
+    else
+      Alert.alert('Картинка', undefined, [
+        { text: camera, onPress: () => void pick('camera') },
+        { text: library, onPress: () => void pick('library') },
+        { text: 'Отмена', style: 'cancel' },
+      ]);
+  }
   return (
     <View style={{ flex: 1, backgroundColor: theme.c.panel }}>
       <View style={{ flex: 1 }}>
@@ -206,6 +270,7 @@ export function NoteEditor({
           active={active}
           onCommand={command}
           onLink={() => setLinkDialog(true)}
+          onImage={chooseImage}
           />
         </View>
       ) : null}

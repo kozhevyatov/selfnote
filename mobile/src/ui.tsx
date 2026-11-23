@@ -96,11 +96,13 @@ export function NoteRow({
   note,
   workspace,
   onPress,
+  onLongPress,
   first,
 }: {
   note: Note;
   workspace: Workspace;
   onPress: () => void;
+  onLongPress?: () => void;
   first: boolean;
 }) {
   const theme = useTheme();
@@ -114,8 +116,11 @@ export function NoteRow({
   return (
     <Pressable
       onPress={onPress}
+      onLongPress={onLongPress}
+      delayLongPress={350}
       accessibilityRole="button"
       accessibilityLabel={`${title}. ${preview}`}
+      accessibilityHint={onLongPress ? 'Долгое нажатие — меню заметки' : undefined}
       style={({ pressed }) => [
         styles.row,
         !first && { borderTopWidth: StyleSheet.hairlineWidth * 2, borderTopColor: c.line },

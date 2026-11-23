@@ -17,6 +17,7 @@ import {
 } from '@selfnote/shared';
 import { api, socketUrl, token } from '../auth';
 import { LocalStore } from './localStore';
+import { Images } from './images';
 import { uuid } from '../ids';
 
 type Extracted = ReturnType<typeof extractDocument>;
@@ -50,6 +51,7 @@ export class Workspace {
   private pumping = false;
   private stopped = false;
   private collaborationTimer: ReturnType<typeof setInterval>;
+  private readonly images: Images;
   collaboration: CollaborationList = { notes: [], owned: [] };
   connection: Connection = 'connecting';
   /** Есть изменения, ещё не подтверждённые сервером. */
@@ -66,7 +68,10 @@ export class Workspace {
     this.socket.on('status', ({ status }: { status: string }) => {
       this.connection =
         status === 'connected' ? 'online' : status === 'connecting' ? 'connecting' : 'offline';
-      if (status === 'connected') void this.refreshCollaboration();
+      if (status === 'connected') {
+        void this.refreshCollaboration();
+        setTimeout(() => void this.uploadImages(), 3000);
+      }
       this.emit();
     });
     this.space = this.open(`space:${userId}`);
@@ -84,7 +89,11 @@ export class Workspace {
         this.emit();
       }
     });
-    this.collaborationTimer = setInterval(() => void this.refreshCollaboration(), 30000);
+    this.images = new Images(server, store, userId);
+    this.collaborationTimer = setInterval(() => {
+      void this.refreshCollaboration();
+      void this.uploadImages();
+    }, 30000);
   }
 
   // ===== подписка для React =====
@@ -159,6 +168,7 @@ export class Workspace {
     } finally {
       this.pumping = false;
     }
+    this.scheduleCleanup();
   }
 
   // ===== данные =====
@@ -271,6 +281,13 @@ export class Workspace {
   touch(id: string) {
     this.patch(id, {}, true);
   }
+  isOwner(id: string) {
+    return this.space.doc.getMap('notes').has(id);
+  }
+  /** Свойства без подъёма в списке: закрепление, избранное, перенос, корзина. */
+  update(id: string, values: Partial<Note>) {
+    if (this.isOwner(id)) this.patch(id, values, false);
+  }
   setTitle(id: string, title: string) {
     this.patch(id, { title }, true);
   }
@@ -338,30 +355,54 @@ export class Workspace {
     });
   }
 
-  /** Картинка заметки как data: URI для редактора (кэш в памяти на время работы). */
-  private images = new Map<string, Promise<string>>();
+  /**
+   * Раз за запуск чистим кэш картинок — когда открыты документы всех заметок
+   * (включая корзину) и пространство синхронизировано с сервером.
+   */
+  private cleaned = false;
+  private cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+  private scheduleCleanup() {
+    if (this.cleaned || this.stopped) return;
+    clearTimeout(this.cleanupTimer);
+    this.cleanupTimer = setTimeout(() => {
+      if (this.cleaned || this.stopped || this.queue.length || this.pumping) return;
+      if (!this.space.provider.isSynced) return this.scheduleCleanup();
+      const ids = [...this.metadata.values()]
+        .filter((n) => !n.encrypted && n.kind !== 'passwords')
+        .map((n) => n.id);
+      if (ids.some((id) => !this.notes.has(id))) {
+        // корзина в очередь не попадает — открываем и её, иначе её картинки сочтём лишними
+        for (const id of ids) this.note(id);
+        return this.scheduleCleanup();
+      }
+      this.cleaned = true;
+      const entries = [...this.notes.values()];
+      // документы должны быть загружены с диска, иначе пустая заметка «не ссылается» на картинки
+      void Promise.all(entries.map((e) => e.ready))
+        .then(() => (this.stopped ? undefined : this.images.cleanup(entries.map((e) => e.doc))))
+        .catch(() => undefined);
+    }, 15000);
+  }
+
+  /** Картинка заметки как data: URI для редактора (с диска или с сервера). */
   imageData(src: string): Promise<string> {
-    if (!src.startsWith('/api/attachments/'))
-      return Promise.reject(new Error('Картинка ещё не синхронизирована'));
-    let pending = this.images.get(src);
-    if (!pending) {
-      pending = (async () => {
-        const response = await fetch(this.server + src, {
-          headers: { Authorization: `Bearer ${await token()}`, 'X-SelfNote-Client': 'app' },
-        });
-        if (!response.ok) throw new Error('Изображение недоступно');
-        const blob = await response.blob();
-        return await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(String(reader.result));
-          reader.onerror = () => reject(new Error('Не удалось прочитать изображение'));
-          reader.readAsDataURL(blob);
-        });
-      })();
-      pending.catch(() => this.images.delete(src));
-      this.images.set(src, pending);
-    }
-    return pending;
+    return this.images.data(src);
+  }
+  /** Картинка с камеры или из галереи: сохраняется на телефоне, на сервер уходит при связи. */
+  async addImage(uri: string, mime?: string): Promise<string> {
+    const src = await this.images.add(uri, mime);
+    setTimeout(() => void this.uploadImages(), 1500);
+    return src;
+  }
+  uploadImages() {
+    if (this.stopped || this.connection !== 'online') return Promise.resolve();
+    return this.images.upload(
+      [...this.notes].map(([id, entry]) => [id, entry.doc]),
+      (id) => {
+        const entry = this.notes.get(id);
+        return !!entry && entry.provider.isSynced && this.canEdit(id);
+      },
+    );
   }
 
   async refreshCollaboration() {
@@ -393,6 +434,7 @@ export class Workspace {
   async destroy() {
     this.stopped = true;
     clearInterval(this.collaborationTimer);
+    clearTimeout(this.cleanupTimer);
     clearTimeout(this.emitTimer);
     for (const entry of [this.space, ...this.notes.values()]) entry.provider.destroy();
     this.socket.destroy();

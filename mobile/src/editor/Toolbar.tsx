@@ -5,6 +5,7 @@ import {
   EyeOff,
   Heading2,
   Heading3,
+  ImagePlus,
   Italic,
   Link,
   List,
@@ -17,7 +18,7 @@ import {
 import type { EditorActive, EditorCommand } from '@selfnote/shared';
 import { useTheme } from '../theme';
 
-type Item = { command: EditorCommand | 'link'; label: string; Icon: typeof Bold } | 'divider';
+type Item = { command: EditorCommand | 'link' | 'image'; label: string; Icon: typeof Bold } | 'divider';
 const ITEMS: Item[] = [
   { command: 'bold', label: 'Жирный', Icon: Bold },
   { command: 'italic', label: 'Курсив', Icon: Italic },
@@ -30,6 +31,7 @@ const ITEMS: Item[] = [
   { command: 'heading2', label: 'Заголовок', Icon: Heading2 },
   { command: 'heading3', label: 'Подзаголовок', Icon: Heading3 },
   { command: 'link', label: 'Ссылка', Icon: Link },
+  { command: 'image', label: 'Картинка', Icon: ImagePlus },
   'divider',
   { command: 'undo', label: 'Отменить', Icon: Undo2 },
   { command: 'redo', label: 'Повторить', Icon: Redo2 },
@@ -41,11 +43,13 @@ export function Toolbar({
   active,
   onCommand,
   onLink,
+  onImage,
 }: {
   area: 'title' | 'body';
   active: EditorActive;
   onCommand: (command: EditorCommand) => void;
   onLink: () => void;
+  onImage: () => void;
 }) {
   const theme = useTheme();
   const { c } = theme;
@@ -74,7 +78,9 @@ export function Toolbar({
             <Pressable
               key={command}
               disabled={disabled}
-              onPress={() => (command === 'link' ? onLink() : onCommand(command))}
+              onPress={() =>
+                command === 'link' ? onLink() : command === 'image' ? onImage() : onCommand(command)
+              }
               accessibilityRole="button"
               accessibilityLabel={label}
               accessibilityState={{ selected: on, disabled }}

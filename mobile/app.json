@@ -47,6 +47,14 @@
             "backgroundColor": "#141416"
           }
         }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "SelfNote добавляет выбранные фото в ваши заметки.",
+          "cameraPermission": "SelfNote снимает фото, чтобы добавить его в заметку.",
+          "microphonePermission": false
+        }
       ]
     ],
     "experiments": {
