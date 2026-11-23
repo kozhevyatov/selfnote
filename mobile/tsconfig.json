@@ -1,0 +1,13 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "lib": ["DOM", "ESNext"],
+    "moduleResolution": "bundler",
+    "paths": {
+      "@selfnote/shared": ["../app/packages/shared/src/index.ts"]
+    }
+  },
+  "include": ["**/*.ts", "**/*.tsx", "../app/packages/shared/src/**/*.ts"],
+  "exclude": ["node_modules", "../app/packages/shared/src/**/*.test.ts"]
+}

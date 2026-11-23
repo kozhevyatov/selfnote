@@ -143,6 +143,19 @@ app.setErrorHandler((error, request, reply) => {
         : 'Не удалось выполнить запрос. Подробности в журнале сервера.',
   });
 });
+/**
+ * Приложение (iOS/Android, позже десктоп) не пользуется cookie: refresh-токен
+ * приходит в теле ответа, приложение хранит его в защищённом хранилище устройства
+ * и присылает в теле запросов /api/auth/refresh и /api/auth/logout.
+ */
+function isAppClient(request: import('fastify').FastifyRequest) {
+  return request.headers['x-selfnote-client'] === 'app';
+}
+function bodyRefreshToken(request: import('fastify').FastifyRequest): string | undefined {
+  if (!isAppClient(request)) return undefined;
+  const value = (request.body as { refreshToken?: unknown } | undefined)?.refreshToken;
+  return typeof value === 'string' && value.length > 0 && value.length <= 128 ? value : undefined;
+}
 async function issueSession(
   user: { id: string; name: string; email: string; role?: string },
   reply: import('fastify').FastifyReply,
@@ -160,11 +173,13 @@ async function issueSession(
       expires_at: new Date(now.getTime() + 30 * 86400000).toISOString(),
     })
     .execute();
-  reply.setCookie('refresh', token, cookieOptions);
-  return {
+  const result = {
     accessToken: app.jwt.sign({ sub: user.id, sid }, { expiresIn: '15m' }),
     user: { id: user.id, name: user.name, email: user.email, role: user.role ?? 'user' },
   };
+  if (isAppClient(reply.request)) return { ...result, refreshToken: token };
+  reply.setCookie('refresh', token, cookieOptions);
+  return result;
 }
 let settingUp = false;
 /** Режим обслуживания на время восстановления из копии: новые подключения не принимаются. */
@@ -309,7 +324,7 @@ app.post(
   },
 );
 app.post('/api/auth/refresh', async (request, reply) => {
-  const token = request.cookies.refresh;
+  const token = request.cookies.refresh ?? bodyRefreshToken(request);
   if (!token) return reply.code(401).send({ message: 'Войдите в аккаунт' });
   const session = await database()
     .selectFrom('sessions')
@@ -335,11 +350,9 @@ app.post('/api/auth/refresh', async (request, reply) => {
   };
 });
 app.post('/api/auth/logout', async (request, reply) => {
-  if (request.cookies.refresh)
-    await database()
-      .deleteFrom('sessions')
-      .where('token_hash', '=', hash(request.cookies.refresh))
-      .execute();
+  const token = request.cookies.refresh ?? bodyRefreshToken(request);
+  if (token)
+    await database().deleteFrom('sessions').where('token_hash', '=', hash(token)).execute();
   reply.clearCookie('refresh', { path: '/api' });
   return { ok: true };
 });

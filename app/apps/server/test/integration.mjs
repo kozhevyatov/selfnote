@@ -108,6 +108,32 @@ try {
   assert.equal((await request('/api/tasks')).status, 401);
   assert.equal((await request('/api/auth/refresh', {}, undefined, cookie)).status, 200);
   console.log('✓ Настройка SQLite, защита повторной настройки, вход и refresh');
+  {
+    // Приложение: refresh-токен в теле, без cookie
+    const appHeaders = { 'Content-Type': 'application/json', 'X-SelfNote-Client': 'app' };
+    const appCall = (url, body) =>
+      fetch(base + url, { method: 'POST', headers: appHeaders, body: JSON.stringify(body) });
+    r = await appCall('/api/auth/login', { email: setup.email, password: setup.password });
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get('set-cookie'), null);
+    const session = await r.json();
+    assert.ok(session.accessToken && session.refreshToken);
+    r = await appCall('/api/auth/refresh', { refreshToken: session.refreshToken });
+    assert.equal(r.status, 200);
+    assert.ok((await r.json()).accessToken);
+    // без заголовка приложения токен из тела не принимается
+    assert.equal(
+      (await request('/api/auth/refresh', { refreshToken: session.refreshToken })).status,
+      401,
+    );
+    assert.equal(
+      (await appCall('/api/auth/logout', { refreshToken: session.refreshToken })).status,
+      200,
+    );
+    r = await appCall('/api/auth/refresh', { refreshToken: session.refreshToken });
+    assert.equal(r.status, 401);
+    console.log('✓ Вход приложения: refresh-токен в теле, обновление и выход');
+  }
   const noteId = randomUUID();
   const name = `note:${noteId}`;
   const a = connect(name, owner.accessToken);
