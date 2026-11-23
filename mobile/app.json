@@ -24,7 +24,11 @@
     },
     "android": {
       "package": "ru.nskarl.selfnote",
-      "edgeToEdgeEnabled": true
+      "edgeToEdgeEnabled": true,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#3451D1"
+      }
     },
     "plugins": [
       "expo-router",
@@ -32,10 +36,22 @@
       "expo-sqlite",
       "expo-font",
       "expo-status-bar",
-      "expo-splash-screen"
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 96,
+          "resizeMode": "contain",
+          "backgroundColor": "#ECEBE7",
+          "dark": {
+            "backgroundColor": "#141416"
+          }
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": false
-    }
+    },
+    "icon": "./assets/icon.png"
   }
 }

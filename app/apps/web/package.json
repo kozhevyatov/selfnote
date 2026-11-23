@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "tsc --noEmit && vite build"
+    "build": "tsc --noEmit && vite build",
+    "build:mobile-editor": "vite build -c vite.mobile-editor.config.ts && node scripts/pack-mobile-editor.mjs"
   },
   "dependencies": {
     "@selfnote/shared": "*",

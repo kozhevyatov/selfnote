@@ -1,0 +1,343 @@
+/* Редактор в WebView мобильного приложения. Цвета приходят из приложения (applyTheme). */
+:root {
+  --background: #ffffff;
+  --text: #1d1d1f;
+  --secondary: #55555b;
+  --muted: #66666c;
+  --faint: #8a8990;
+  --line: #f0efec;
+  --soft: #f3f2ef;
+  --accent: #3451d1;
+  --accent-text: #3451d1;
+  --tint: #e6e9f9;
+  --danger: #b42318;
+  --danger-bg: #fdecec;
+  --strong: #1d1d1f;
+  color-scheme: light;
+  -webkit-text-size-adjust: 100%;
+}
+:root[data-theme='dark'] {
+  color-scheme: dark;
+}
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--text);
+  font-family:
+    'Golos Text',
+    -apple-system,
+    system-ui,
+    sans-serif;
+  font-size: 17px;
+  line-height: 1.55;
+  -webkit-tap-highlight-color: transparent;
+}
+#page {
+  padding: 4px 22px 160px;
+  min-height: 100vh;
+}
+#title {
+  display: block;
+  width: 100%;
+  border: 0;
+  outline: 0;
+  resize: none;
+  overflow: hidden;
+  padding: 0;
+  margin: 0 0 14px;
+  background: transparent;
+  color: var(--text);
+  font:
+    800 32px/1.12 'Golos Text',
+    -apple-system,
+    system-ui,
+    sans-serif;
+  letter-spacing: -0.035em;
+}
+#title::placeholder {
+  color: var(--faint);
+}
+.note-body {
+  outline: none;
+  min-height: 50vh;
+  caret-color: var(--accent);
+  word-wrap: break-word;
+}
+.note-body > * + * {
+  margin-top: 0.6em;
+}
+.note-body p {
+  margin: 0;
+}
+.note-body h2,
+.note-body h3 {
+  margin: 1em 0 0.3em;
+  letter-spacing: -0.025em;
+  line-height: 1.25;
+}
+.note-body h2 {
+  font-size: 22px;
+  font-weight: 700;
+}
+.note-body h3 {
+  font-size: 19px;
+  font-weight: 700;
+}
+.note-body a {
+  color: var(--accent-text);
+}
+.note-body strong {
+  font-weight: 700;
+}
+.note-body s {
+  color: var(--muted);
+}
+.note-body ul,
+.note-body ol {
+  padding-left: 1.4em;
+  margin: 0.4em 0;
+}
+.note-body li > p {
+  margin: 0;
+}
+.note-body blockquote {
+  margin: 0.6em 0;
+  padding-left: 12px;
+  border-left: 3px solid var(--line);
+  color: var(--secondary);
+}
+.note-body code {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 0.9em;
+  background: var(--soft);
+  border-radius: 6px;
+  padding: 1px 5px;
+}
+.note-body pre {
+  background: var(--soft);
+  border-radius: 12px;
+  padding: 12px;
+  overflow-x: auto;
+}
+.note-body pre code {
+  background: none;
+  padding: 0;
+}
+.note-body hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 1.2em 0;
+}
+.spoiler {
+  background: var(--strong);
+  color: transparent;
+  border-radius: 5px;
+  padding: 0 2px;
+  transition: background 0.15s;
+}
+.spoiler.revealed {
+  background: var(--soft);
+  color: inherit;
+}
+mark {
+  border-radius: 4px;
+  padding: 0 2px;
+  color: inherit;
+  background: #fde68a;
+}
+:root[data-theme='dark'] mark {
+  background: #6b5310;
+}
+.text-color-red {
+  color: #c0352b;
+}
+.text-color-orange {
+  color: #c2610c;
+}
+.text-color-yellow {
+  color: #a17a05;
+}
+.text-color-green {
+  color: #23843d;
+}
+.text-color-blue {
+  color: #2a62c9;
+}
+.text-color-purple {
+  color: #7a3db8;
+}
+.text-color-gray {
+  color: var(--muted);
+}
+.highlight-red {
+  background: #fbd5d1;
+}
+.highlight-orange {
+  background: #fde0c2;
+}
+.highlight-green {
+  background: #cfeed6;
+}
+.highlight-blue {
+  background: #d6e4fb;
+}
+.highlight-purple {
+  background: #e7d8f6;
+}
+.highlight-gray {
+  background: var(--soft);
+}
+:root[data-theme='dark'] .text-color-red {
+  color: #ff8f85;
+}
+:root[data-theme='dark'] .text-color-orange {
+  color: #f5a35a;
+}
+:root[data-theme='dark'] .text-color-yellow {
+  color: #e8c552;
+}
+:root[data-theme='dark'] .text-color-green {
+  color: #6fd38a;
+}
+:root[data-theme='dark'] .text-color-blue {
+  color: #8ab0f5;
+}
+:root[data-theme='dark'] .text-color-purple {
+  color: #c49cef;
+}
+:root[data-theme='dark'] .highlight-red {
+  background: #5a2420;
+}
+:root[data-theme='dark'] .highlight-orange {
+  background: #5a3818;
+}
+:root[data-theme='dark'] .highlight-green {
+  background: #1f4a2a;
+}
+:root[data-theme='dark'] .highlight-blue {
+  background: #1f3560;
+}
+:root[data-theme='dark'] .highlight-purple {
+  background: #3e2860;
+}
+
+/* задачи */
+ul[data-type='taskList'] {
+  list-style: none;
+  padding: 0;
+  margin: 0.4em 0;
+}
+.task-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 9px 0;
+  border-top: 1px solid var(--line);
+}
+.task-item:first-child {
+  border-top: 0;
+}
+.task-check {
+  flex: none;
+  display: flex;
+  padding-top: 2px;
+}
+.task-check input {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  border: 2px solid var(--faint);
+  border-radius: 6px;
+  display: grid;
+  place-content: center;
+}
+.task-check input:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.task-check input:checked::after {
+  content: '';
+  width: 6px;
+  height: 11px;
+  border: solid #fff;
+  border-width: 0 2.5px 2.5px 0;
+  transform: translateY(-1px) rotate(45deg);
+}
+.task-content {
+  flex: 1;
+  min-width: 0;
+}
+.task-item.checked > .task-content {
+  color: var(--faint);
+  text-decoration: line-through;
+}
+.task-due {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  margin-top: 1px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.task-due input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+}
+.task-due.today {
+  color: var(--accent-text);
+  background: var(--tint);
+}
+.task-due.overdue {
+  color: var(--danger);
+  background: var(--danger-bg);
+}
+.task-due.later {
+  color: var(--secondary);
+  background: var(--soft);
+}
+.task-due.empty {
+  color: var(--faint);
+  padding: 2px 4px;
+}
+.task-due.hidden {
+  display: none;
+}
+
+/* картинки */
+.note-image {
+  margin: 0.6em 0;
+}
+.note-image img {
+  display: block;
+  max-width: 100%;
+  border-radius: 14px;
+}
+.note-image span {
+  display: block;
+  padding: 14px;
+  border-radius: 14px;
+  background: var(--soft);
+  color: var(--muted);
+  font-size: 14px;
+}
+.ProseMirror-selectednode.note-image img {
+  outline: 3px solid var(--accent);
+}
+.ProseMirror .ProseMirror-gapcursor:after {
+  border-top-color: var(--text);
+}

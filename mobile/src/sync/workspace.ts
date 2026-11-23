@@ -17,6 +17,7 @@ import {
 } from '@selfnote/shared';
 import { api, socketUrl, token } from '../auth';
 import { LocalStore } from './localStore';
+import { uuid } from '../ids';
 
 type Extracted = ReturnType<typeof extractDocument>;
 type StoredNote = Y.Map<unknown> | Note;
@@ -267,12 +268,100 @@ export class Workspace {
     if (setTaskChecked(entry.doc, taskId, checked)) this.touch(noteId);
   }
   /** Поднять заметку в списке после правки содержимого (как update(id, {}) в вебе). */
-  private touch(id: string) {
+  touch(id: string) {
+    this.patch(id, {}, true);
+  }
+  setTitle(id: string, title: string) {
+    this.patch(id, { title }, true);
+  }
+  /** Свойства заметки: как Workspace.update в вебе (общие заметки — через карту collaboration). */
+  private patch(id: string, values: Partial<Note>, touch: boolean) {
+    if (!this.canEdit(id)) return;
     const now = new Date().toISOString();
-    const shared = this.notes.get(id)?.doc.getMap('collaboration');
-    if (shared?.has('title')) shared.set('updatedAt', now);
-    const fields = this.space.doc.getMap<StoredNote>('notes').get(id);
-    if (fields instanceof Y.Map) fields.set('updatedAt', now);
+    const entry = this.notes.get(id);
+    const shared = entry?.doc.getMap('collaboration');
+    if (shared?.has('title'))
+      entry!.doc.transact(() => {
+        if (values.title !== undefined) shared.set('title', values.title);
+        if (touch) shared.set('updatedAt', now);
+      });
+    const notes = this.space.doc.getMap<StoredNote>('notes');
+    const current = notes.get(id);
+    if (!current) return;
+    this.space.doc.transact(() => {
+      let fields: Y.Map<unknown>;
+      if (current instanceof Y.Map) fields = current;
+      else {
+        // перевод заметки старого формата в Y.Map
+        fields = new Y.Map();
+        for (const [key, value] of Object.entries(current)) fields.set(key, value);
+        notes.set(id, fields);
+      }
+      for (const [key, value] of Object.entries(values))
+        if (JSON.stringify(fields.get(key)) !== JSON.stringify(value)) fields.set(key, value ?? null);
+      if (touch) fields.set('updatedAt', now);
+    });
+  }
+  /** Новая пустая заметка (как createNote в вебе). */
+  addNote(notebookId: string | null, sectionId: string | null): string {
+    const id = uuid();
+    const fields = new Y.Map<unknown>();
+    for (const [key, value] of Object.entries({
+      id,
+      title: '',
+      notebookId,
+      sectionId,
+      tags: [],
+      pinned: false,
+      updatedAt: new Date().toISOString(),
+      deletedAt: null,
+      encrypted: false,
+      color: null,
+    } satisfies Note))
+      fields.set(key, value);
+    this.space.doc.getMap<StoredNote>('notes').set(id, fields);
+    this.note(id);
+    return id;
+  }
+  /** Заметку создали и ничего не написали — убираем её совсем, не в корзину. */
+  discardIfEmpty(id: string) {
+    const meta = this.metadata.get(id);
+    if (!meta || meta.title.trim() || !this.space.doc.getMap('notes').has(id)) return;
+    const entry = this.notes.get(id);
+    const content = entry?.doc.getXmlFragment('content');
+    if (!content || content.length > 1 || content.toString().includes('<image')) return;
+    if (this.extract(id).plainText.trim()) return;
+    if (this.extract(id).tasks.length) return;
+    this.space.doc.transact(() => {
+      this.space.doc.getMap('purged').set(id, true);
+      this.space.doc.getMap('notes').delete(id);
+    });
+  }
+
+  /** Картинка заметки как data: URI для редактора (кэш в памяти на время работы). */
+  private images = new Map<string, Promise<string>>();
+  imageData(src: string): Promise<string> {
+    if (!src.startsWith('/api/attachments/'))
+      return Promise.reject(new Error('Картинка ещё не синхронизирована'));
+    let pending = this.images.get(src);
+    if (!pending) {
+      pending = (async () => {
+        const response = await fetch(this.server + src, {
+          headers: { Authorization: `Bearer ${await token()}`, 'X-SelfNote-Client': 'app' },
+        });
+        if (!response.ok) throw new Error('Изображение недоступно');
+        const blob = await response.blob();
+        return await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result));
+          reader.onerror = () => reject(new Error('Не удалось прочитать изображение'));
+          reader.readAsDataURL(blob);
+        });
+      })();
+      pending.catch(() => this.images.delete(src));
+      this.images.set(src, pending);
+    }
+    return pending;
   }
 
   async refreshCollaboration() {

@@ -6,6 +6,7 @@ export * from './repeat.js';
 export * from './render.js';
 export * from './search.js';
 export * from './secure.js';
+export * from './editorBridge.js';
 export interface Notebook {
   id: string;
   name: string;
