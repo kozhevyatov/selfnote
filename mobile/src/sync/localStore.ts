@@ -48,22 +48,31 @@ export class LocalStore {
     if (row?.state?.length) Y.applyUpdate(doc, new Uint8Array(row.state), LOCAL_ORIGIN);
   }
 
-  /** Записывает накопленные изменения (вызывается и при уходе приложения в фон). */
-  async flush() {
+  /**
+   * Записывает накопленные изменения (вызывается и при уходе приложения в фон).
+   * Записи идут строго по очереди: expo-sqlite не допускает вложенных транзакций,
+   * а таймер и уход в фон могут запустить flush одновременно.
+   */
+  flush(): Promise<void> {
     clearTimeout(this.timer);
     this.timer = undefined;
+    this.queue = this.queue.then(() => this.write()).catch((error) => {
+      console.warn('[store] не удалось сохранить документы', error);
+    });
+    return this.queue;
+  }
+  private queue: Promise<void> = Promise.resolve();
+  private async write() {
     const batch = [...this.pending];
     this.pending.clear();
     if (!batch.length || this.closed) return;
     const now = Date.now();
-    await this.db.withTransactionAsync(async () => {
-      for (const [name, doc] of batch)
-        await this.db.runAsync(
-          `INSERT INTO docs (name, state, updated_at) VALUES (?, ?, ?)
-           ON CONFLICT(name) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at`,
-          [name, Y.encodeStateAsUpdate(doc), now],
-        );
-    });
+    for (const [name, doc] of batch)
+      await this.db.runAsync(
+        `INSERT INTO docs (name, state, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(name) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at`,
+        [name, Y.encodeStateAsUpdate(doc), now],
+      );
   }
 
   async get<T>(key: string): Promise<T | null> {
@@ -85,7 +94,7 @@ export class LocalStore {
   }
 
   async close() {
-    await this.flush().catch(() => undefined);
+    await this.flush();
     this.closed = true;
     await this.db.closeAsync().catch(() => undefined);
   }
