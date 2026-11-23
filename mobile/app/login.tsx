@@ -11,7 +11,8 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Eye, EyeOff, KeyRound, Mail, Feather, Server } from 'lucide-react-native';
+import { Eye, EyeOff, KeyRound, Mail, Server } from 'lucide-react-native';
+import { Logo } from '../src/Logo';
 import { lastLogin, login } from '../src/auth';
 import { fonts, useTheme } from '../src/theme';
 
@@ -65,7 +66,7 @@ export default function Login() {
         keyboardShouldPersistTaps="handled"
       >
         <View style={[styles.logo, { backgroundColor: theme.accent }]}>
-          <Feather color="#FFFFFF" size={30} strokeWidth={2} />
+          <Logo size={32} />
         </View>
         <Text style={[styles.title, { color: c.text }]}>SelfNote</Text>
         <Text style={[styles.subtitle, { color: c.secondary }]}>
