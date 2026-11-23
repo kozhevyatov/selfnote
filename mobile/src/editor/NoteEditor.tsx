@@ -5,7 +5,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { KeyboardAvoidingView, Linking, Platform, StyleSheet, View } from 'react-native';
-import { WebView, type WebViewMessageEvent } from 'react-native-webview';
+import { WebView, type WebViewMessageEvent, type WebViewProps } from 'react-native-webview';
 import * as Y from 'yjs';
 import {
   fromBase64,
@@ -23,6 +23,12 @@ import { LinkDialog } from './LinkDialog';
 import { Toolbar } from './Toolbar';
 
 const FROM_EDITOR = Symbol('editor');
+
+/** Типы WebView 14 с TypeScript 6 сводят пропсы к never (P = undefined) — описываем сами. */
+type WebViewHandle = { injectJavaScript(script: string): void; reload(): void };
+const EditorWebView = WebView as unknown as React.ComponentType<
+  WebViewProps & { ref?: React.Ref<WebViewHandle> }
+>;
 
 function editorTheme(theme: Theme): EditorTheme {
   const { c } = theme;
@@ -60,7 +66,7 @@ export function NoteEditor({
   focusTitle: boolean;
 }) {
   const theme = useTheme();
-  const webview = useRef<WebView>(null);
+  const webview = useRef<WebViewHandle>(null);
   const ready = useRef(false);
   const [focus, setFocus] = useState<'title' | 'body' | null>(null);
   const [active, setActive] = useState<EditorActive>({});
@@ -152,7 +158,7 @@ export function NoteEditor({
       keyboardVerticalOffset={0}
     >
       <View style={{ flex: 1, backgroundColor: theme.c.panel }}>
-        <WebView
+        <EditorWebView
           ref={webview}
           source={{ html: editorHtml }}
           originWhitelist={['*']}
