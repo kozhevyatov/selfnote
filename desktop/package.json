@@ -6,8 +6,9 @@
     "web": "cd ../app && npm run build -w @selfnote/shared && npm run build:desktop -w @selfnote/web",
     "icons": "tauri icon app-icon.png",
     "dev": "tauri dev",
-    "build": "tauri build",
-    "build:universal": "tauri build --target universal-apple-darwin"
+    "build": "npm run dmg-bg && tauri build",
+    "build:universal": "npm run dmg-bg && tauri build --target universal-apple-darwin",
+    "dmg-bg": "tiffutil -cathidpicheck dmg/background.png dmg/background@2x.png -out dmg/background.tiff"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.9.0"

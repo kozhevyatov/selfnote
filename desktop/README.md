@@ -28,6 +28,8 @@ npm run dev              # запуск без упаковки (с отладк
 Для Mac на Intel и Apple Silicon сразу: `rustup target add x86_64-apple-darwin`,
 затем `npm run build:universal`.
 
+Окно .dmg: фон `dmg/background.png` и `@2x` (склеиваются в tiff при сборке), значок диска — из значка приложения. Оформление окна делает Finder по AppleScript: Терминалу нужно разрешение «Автоматизация → Finder» (macOS спросит при первой сборке).
+
 Без подписи macOS при первом запуске скажет «неизвестный разработчик»:
 правый клик по SelfNote.app → «Открыть». Подпись и нотаризация — позже
 (Developer ID из аккаунта разработчика Apple).
